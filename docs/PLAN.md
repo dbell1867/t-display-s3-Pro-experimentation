@@ -5,11 +5,11 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 3 complete — interactive
-> Tap Counter app (reusable Button struct, live counter state, correct one-per-tap
-> edge detection using the controller's touch-up event, pressed-while-held
-> feedback). Lesson 03 written. Next up: Stage 3b (framebuffer) for flicker-free
-> scenes + the fading-trail effect, or Stage 4 (LVGL).**
+> `esp32-board-bringup` skill. Current position: **Stage 3b complete — retained-mode
+> framebuffer (Arduino_Canvas in octal PSRAM) driving a fading touch trail. Hit and
+> documented the full-frame-flush ceiling (~40 ms/22 fps, no DMA, ~40 MHz cap).
+> PSRAM now enabled in platformio.ini. Lesson 03b written. Next up: Stage 4 (LVGL),
+> which uses dirty-rectangle rendering to avoid exactly that ceiling.**
 
 ---
 
@@ -36,6 +36,14 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
       event** — a `count == 0` frame — for crisp release, timeout as fallback);
       pressed-while-held feedback via a `Button *activeBtn`. Lesson 03 written +
       snapshot in `docs/lesson-03-interactive/`.
+- [x] **Stage 3b — Framebuffer fading trail** — enabled **octal PSRAM**
+      (`memory_type = qio_opi` + `BOARD_HAS_PSRAM`); `Arduino_Canvas` framebuffer
+      in PSRAM; time-based fading trail (ring buffer + per-point timestamps).
+      **Performance investigation:** full-frame `flush()` ≈ 40 ms (~22 fps); the
+      SPI path is CPU-polled (no DMA) and caps ~40 MHz, so raising the clock did
+      nothing. Fixed under-sampling (poll `getPoint()` directly) + size-popping
+      (constant radius). Fast-motion stutter is the accepted full-frame ceiling.
+      Lesson 03b + snapshot in `docs/lesson-03b-fading-trail/`.
 
 ### Bug fixed (2026-07-14) — native-USB serial freeze/lag
 `Serial.print` on the ESP32-S3's native USB **blocks** when the TX buffer fills
@@ -109,7 +117,7 @@ snapshot `docs/lesson-03-interactive/main.cpp`.
 
 ---
 
-## ▶ Stage 3b — Retained-mode framebuffer (Arduino_Canvas in PSRAM)   ← NEXT
+## ✅ Stage 3b — Retained-mode framebuffer (Arduino_Canvas in PSRAM)   [DONE]
 **Goal:** stop drawing straight to the panel; keep a **saved scene** in memory and
 push it to the display each frame. Unlocks effects that immediate mode can't do
 cleanly: easy clear, **fading / expiring dots** (the "living trail" we deferred),
@@ -128,7 +136,7 @@ expiring-dot trail (per-dot timestamps, redraw scene each frame).
 
 ---
 
-## Stage 4 — Real UX with LVGL
+## ▶ Stage 4 — Real UX with LVGL   ← NEXT
 **Goal:** build a proper widget-based interface (buttons, sliders, labels, screens).
 
 **Approach:** add LVGL; wire two glue callbacks — a *flush* callback that pushes
