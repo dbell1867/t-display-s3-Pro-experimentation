@@ -5,10 +5,11 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 2b complete + polished
-> (touch works, identity mapping, CLEAR button, serial freeze fixed). Next up:
-> Stage 3 (small interactive app), or jump to Stage 3b (framebuffer) for the
-> fading-trail effect.**
+> `esp32-board-bringup` skill. Current position: **Stage 2c complete — smooth
+> touch trail via interpolation (sample-rate investigated in Module 8, fix in
+> Module 9). Touch is now polished end to end. Next up: Stage 3 (small
+> interactive app), or jump to Stage 3b (framebuffer) for the fading-trail
+> effect.**
 
 ---
 
@@ -24,6 +25,11 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 - [x] **Stage 2b polish** — on-screen CLEAR button (hit-testing + edge detection);
       fixed a native-USB `Serial` freeze/lag (see bug note below).
 - [x] Lesson docs 01 + 02 written; `esp32-board-bringup` skill created & updated.
+- [x] **Stage 2c — Smooth touch trail** — measured the sample rate (Module 8:
+      `delay(10)`→16 Hz, `delay(2)`→40 Hz, `delay(0)`→~77 Hz), then fixed the
+      speed-dependent gaps with **linear interpolation** (`drawStroke` connects
+      consecutive touch reports). Uses a **timeout** to track a continuous stroke
+      because the IRQ pulses (Module 9); settled on `delay(2)` (~40 Hz).
 
 ### Bug fixed (2026-07-14) — native-USB serial freeze/lag
 `Serial.print` on the ESP32-S3's native USB **blocks** when the TX buffer fills
@@ -39,6 +45,45 @@ gates the I²C read, via `isPressed()`), **C** true hardware interrupt + ISR fla
 **Chose B now** — removes idle-bus spam with zero added complexity. **Deferred C**
 to a future **low-power lesson**: its payoff is letting the CPU *sleep* and wake on
 touch, which only matters once running on battery (SY6970 PMU, Stage 5).
+
+### Investigation (2026-07-16) — touch sample rate vs dot spacing
+Observation: faster drags leave wider gaps between dots. Measured the sample rate
+by turning the **display into an instrument** (on-screen Hz readout — serial was
+flaky). Results, sweeping the loop `delay`: **`delay(10)` → 16 Hz, `delay(2)` →
+40 Hz, `delay(0)` → ~77 Hz.** Rate is flat across drag speeds (gaps are pure
+geometry: `gap = speed × interval`) and keeps climbing as we poll faster (our loop
+cadence was the bottleneck, not a single controller wall — the IRQ is a brief
+pulse we were partly missing). Even at 77 Hz a fast swipe still gaps, so polling
+alone can't win. Full write-up in `docs/lesson-02-touch.md` Module 8. Fix =
+Stage 2c below. (`delay(0)` also spins the CPU at 100% — a power cost; the true
+fix for rate *and* power is design C, deferred to the low-power lesson.)
+
+---
+
+## ✅ Stage 2c — Smooth the trail (sample rate + interpolation)   [DONE]
+**Goal:** eliminate the gaps a fast drag leaves, so the trail looks continuous at
+any finger speed.
+
+**Approach (two levers, see Module 8):**
+- **Interpolation (the real fix):** track the previous touch point and
+  `gfx->drawLine(prevX, prevY, x, y, …)` instead of an isolated `fillCircle`.
+  Start a **fresh stroke** on each new touch (reset `prevX/prevY` when a touch
+  begins) so we don't draw a line across the screen from the last tap's end.
+  Consider a thicker stroke (draw a small filled circle at each end, or parallel
+  lines) for a nicer pen.
+- **Sample rate:** replace `delay(10)` with a balanced value (~`delay(2)`, ≈40 Hz)
+  — a real, cheap responsiveness win — rather than the power-hungry `delay(0)`.
+
+**Also:** remove the Module 8 measurement scaffolding (on-screen Hz readout,
+timing globals, `VERBOSE_TOUCH`) and re-snapshot `docs/lesson-02-touch/main.cpp`.
+
+**Done when:** a fast swipe draws a continuous line (no visible dot gaps), and the
+firmware is back to a clean, shippable state.
+
+> **Deferred within this theme:** the *true* answer for both sample rate and power
+> is **design C** (hardware interrupt on GPIO 21 — catches every IRQ pulse, lets
+> the CPU sleep). It stays in the low-power lesson (Stage 5); Stage 2c gets the
+> smooth result now with interpolation + a modest delay.
 
 ---
 

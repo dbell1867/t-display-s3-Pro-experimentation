@@ -379,6 +379,227 @@ also sets up LVGL. See `docs/PLAN.md`.
 
 ---
 
+## Module 8 — Why fast drags leave gaps (a performance investigation)
+
+A sharp observation kicked this off: **the faster you drag, the wider the space
+between dots.** Slow drags draw a near-solid line; quick swipes leave a dotted
+trail. That's a symptom worth chasing, because it teaches how to *measure* a
+system before optimizing it.
+
+### The mental model: we're sampling a continuous motion
+
+Your finger moves *continuously*, but `loop()` only looks at it at discrete
+moments — one snapshot per trip through the loop. Each dot is one snapshot. The
+spacing between snapshots obeys a simple rule:
+
+```
+gap distance  =  finger speed  ×  time between samples
+```
+
+Notice **finger speed** is in there. The *time between samples* is roughly
+constant, so a faster finger covers more ground between two snapshots → wider
+gaps. Nothing is "lagging behind"; we're just taking too few pictures of a
+fast-moving subject. That gives us two independent levers:
+
+| Lever | What it does | Ceiling |
+|---|---|---|
+| **A. Sample more often** (shrink time between samples) | more dots, closer together | a hardware wall (below) |
+| **B. Connect the samples** (draw a *line* between them) | continuous trail at any speed | basically none — it's cheap |
+
+### Measure first: turn the display into an instrument
+
+The honest way to size lever A is to measure our real sample rate. Serial was
+being flaky, so we used a channel that *always* works on this board — **the
+display itself**. We timestamped each accepted touch frame with `micros()` and,
+every 30 frames, painted the average interval and implied rate in the corner:
+
+```cpp
+uint32_t now = micros();
+if (lastSampleUs != 0) {
+  uint32_t dt = now - lastSampleUs;
+  if (dt < 200000) {                 // ignore gaps > 200 ms (a real finger-lift)
+    dtSumUs += dt;
+    if (++sampleCount >= 30) {
+      float avgMs = (dtSumUs / 30.0f) / 1000.0f;
+      drawStats(avgMs, 1000.0f / avgMs);   // cyan readout on the glass — no serial needed
+      /* reset accumulators */
+    }
+  }
+}
+lastSampleUs = now;
+```
+
+> **Lesson inside the lesson:** when one debug channel fights you, use another.
+> The screen is a perfectly good place to print numbers.
+
+### A bug in the instrument — and what it revealed about the IRQ
+
+The first version showed *nothing*: dots drew fine, but the readout never
+appeared. The cause taught us something real about the hardware. We'd written:
+
+```cpp
+if (!pressed) lastSampleUs = 0;   // reset the timer when "not pressed"
+```
+
+But recall from Module 6 that `isPressed()` reads the **IRQ line (GPIO 21)**, and
+that line only *pulses* when the controller has a fresh frame — it goes
+**inactive between frames even while your finger is down**. So `pressed`
+flickered false between every frame, wiping our timing anchor each time, so every
+frame looked like "the first of a new drag" and the counter never advanced.
+
+The fix was to time consecutive *accepted* frames and ignore only genuine lifts
+(gaps > 200 ms), rather than trusting the flickering `pressed` flag. **Takeaway:
+the touch IRQ is a brief pulse, not a steady "is-touched" level.** Hold that
+thought.
+
+### The numbers
+
+With the instrument working, we swept the loop's `delay()` and read the rate off
+the screen during a medium-speed drag:
+
+| Loop `delay` | Sample rate | Interval |
+|---|---|---|
+| `delay(10)` (original) | **16 Hz** | ~62 ms |
+| `delay(2)` | **40 Hz** | ~25 ms |
+| `delay(0)` (spin) | **~77 Hz** | ~13 ms |
+
+Two findings:
+
+1. **The rate was flat across drag speeds** (15 / 16 / 16 Hz slow/medium/fast at
+   `delay(10)`). That confirms the gaps are pure geometry — the loop samples at a
+   fixed rate regardless of how fast you move. Lever B is the right fix.
+2. **The rate kept climbing as we polled faster** — no clean plateau. So the
+   original bottleneck was *our own loop cadence*, not a single hard controller
+   wall. And the fact that faster polling caught *more* frames confirms the IRQ is
+   a short pulse we were partly **missing** with a slow loop.
+
+### Why lever A alone can't win
+
+Convert rate into what the eye sees (~9 px/mm on this panel). For a **fast swipe**
+(~300 mm/s):
+
+| Rate | Gap between dot centres |
+|---|---|
+| 16 Hz | ~56 px (badly broken) |
+| 40 Hz | ~22 px |
+| 77 Hz | **~12 px — still a visible gap** with radius-5 dots |
+
+So **even at the ceiling, a quick flick still gaps.** Polling faster helps
+enormously, but geometry always catches up. That's the proof we need lever B.
+
+### The tradeoff on cranking the delay to zero
+
+`delay(0)` buys the best rate but the core **never sleeps** — it spins at 100%
+between frames. Fine on USB power, bad on a battery. So "just poll flat out" isn't
+free; it trades power for responsiveness.
+
+And here's the payoff to a decision from Module 6: the reason faster polling
+caught more frames is that we were *missing IRQ pulses*. A **true hardware
+interrupt (design C)** — `attachInterrupt` on the IRQ edge — catches **every**
+pulse regardless of loop timing, giving us the full frame rate **and** letting the
+CPU sleep between touches. We deferred design C thinking it was only about power;
+it turns out to also be the "right" way to get the sample rate. Another reason it
+earns its own low-power lesson later.
+
+### The decision
+
+- **Fix (planned): interpolation (lever B)** — draw a line from the previous
+  point to the current one, starting a fresh stroke on each new touch. Makes the
+  trail continuous at any speed, cheaply. Tracked in `docs/PLAN.md` as Stage 2c.
+- **Sample rate:** a smaller `delay` is a real, easy win (16 → 40 Hz), so we'll
+  pick a balanced value rather than the power-hungry `delay(0)`. The *full* answer
+  (design C) waits for the low-power lesson.
+
+> **Method takeaway:** we *measured before optimizing*, built an instrument when
+> the obvious one failed, found a bug that taught us how the hardware really
+> behaves, and proved which lever actually solves the problem. That sequence —
+> observe → measure → diagnose → choose the fix — is the whole game.
+
+---
+
+## Module 9 — Implementing the smooth trail (Stage 2c)
+
+With the diagnosis from Module 8 in hand, the fix was **interpolation**: connect
+consecutive touch reports instead of drawing isolated dots.
+
+### The interpolation helper
+
+```cpp
+#define DOT_RADIUS 3   // brush thickness
+
+// Draw a continuous stroke from (x0,y0) to (x1,y1) by placing a dot every ~2 px
+// along the straight line between them.
+void drawStroke(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+  int16_t dx = x1 - x0, dy = y1 - y0;
+  int16_t span  = max(abs(dx), abs(dy));   // pixels the finger jumped
+  int16_t steps = span / 2; if (steps < 1) steps = 1;
+  for (int16_t i = 0; i <= steps; i++) {
+    int16_t x = x0 + (int32_t)dx * i / steps;   // fraction i/steps along the line
+    int16_t y = y0 + (int32_t)dy * i / steps;
+    gfx->fillCircle(x, y, DOT_RADIUS, RGB565_YELLOW);
+  }
+}
+```
+
+That's **linear interpolation**: the point a fraction `i/steps` of the way from
+the start to the end is `start + (end − start) × i/steps`, done separately for x
+and y. We synthesize the samples the hardware never gave us.
+
+> **A real C++ gotcha:** `dx * i` can exceed a 16-bit range (a 480-px jump × 240
+> steps ≈ 115 000, but an `int16_t` maxes at 32 767). The cast `(int32_t)dx * i`
+> promotes the whole calculation to 32-bit so it can't overflow. In Python
+> integers grow without limit; in C++ you must *choose* a type wide enough.
+
+### The same IRQ bug, a second time
+
+The first attempt drew *only isolated dots* — no connecting line. The cause was
+**the exact pulse behaviour from Module 8**, biting again. This code looked
+reasonable:
+
+```cpp
+if (touch.isPressed()) { /* ... draw ... haveStroke = true; */ }
+else haveStroke = false;      // "finger lifted → start a new stroke"
+```
+
+But `isPressed()` reads the IRQ, which goes **inactive between frames even while
+touching** — so `pressed` flickered false constantly, the `else` wiped
+`haveStroke` between *every* frame, and each accepted frame took the "first point,
+draw a single dot" branch. Never interpolated. **Lesson learned twice: don't use
+the flickering `pressed` flag to decide "same touch or new touch."**
+
+### The fix: time the gap, don't trust the flag
+
+We decide continuation by **elapsed time between accepted frames** instead:
+
+```cpp
+#define STROKE_TIMEOUT_MS 200
+
+uint32_t now = millis();
+bool sameSession = (now - lastTouchMs) < STROKE_TIMEOUT_MS;   // same finger-down?
+// ... use sameSession to continue-or-restart the stroke ...
+lastTouchMs = now;
+```
+
+During a drag, frames arrive ~25 ms apart (< 200 ms) → same session → interpolate.
+Lift your finger and the frames stop; the next touch is > 200 ms later → new
+session → fresh stroke, no line dragged across the screen. As a bonus, the same
+`sameSession` flag makes the **CLEAR button fire exactly once per press** (only on
+a *new* press that lands inside it), so we no longer need a separate edge flag.
+
+### The result
+
+- Smooth continuous strokes at **any** finger speed — the gaps are gone.
+- `delay(2)` (~40 Hz) keeps it responsive without spinning the CPU flat out.
+- The measurement scaffolding (on-screen Hz readout, timing globals) is removed;
+  `src/main.cpp` is clean and snapshotted to `docs/lesson-02-touch/main.cpp`.
+
+> **Meta-lesson:** the same hardware fact — *the touch IRQ is a pulse, not a
+> level* — caused two different bugs (the measurement instrument, then the stroke
+> logic). Understanding the hardware once paid off twice. And the robust pattern
+> for "is this the same continuous gesture?" is a **timeout**, not a level flag.
+
+---
+
 ## What you built and learned
 
 - ✅ Added SensorLib; brought up the CST226SE over I²C
@@ -389,6 +610,10 @@ also sets up LVGL. See `docs/PLAN.md`.
 - ✅ Evaluated **polling vs interrupt** and adopted IRQ-gated polling (design B)
 - ✅ Built an on-screen **Clear button** with **hit-testing** + edge detection
 - ✅ Diagnosed & fixed a **native-USB serial freeze** (non-blocking `Serial`)
+- ✅ **Measured the touch sample rate** (display-as-instrument) and learned why
+     fast drags gap — pointing to interpolation as the real fix (Stage 2c)
+- ✅ **Implemented a smooth trail with linear interpolation**, using a *timeout*
+     (not the flickering IRQ flag) to track a continuous stroke
 
 ## Command cheat-sheet
 
@@ -417,6 +642,8 @@ pio run -t upload             # build + flash
 - **Edge vs level** — reacting to a *change* of state (press edge) vs the ongoing state (finger held); buttons want edges, drawing wants level.
 - **Immediate vs retained mode** — drawing straight to the panel (no saved scene) vs keeping a framebuffer you redraw; retained mode makes clear/fade/animation easy.
 - **Non-blocking I/O** — an output that *drops* when it can't proceed instead of *waiting*, so it can't stall the program (`Serial.setTxTimeoutMs(0)`).
+- **Sample rate** — how many times per second we read the input; sets the *time between samples* and therefore the dot spacing (`gap = speed × interval`).
+- **Interpolation** — filling the space *between* samples with geometry (e.g. drawing a line between two touch points) so the result looks continuous regardless of sample rate.
 
 ## Next lesson
 
