@@ -5,11 +5,11 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 2c complete — smooth
-> touch trail via interpolation (sample-rate investigated in Module 8, fix in
-> Module 9). Touch is now polished end to end. Next up: Stage 3 (small
-> interactive app), or jump to Stage 3b (framebuffer) for the fading-trail
-> effect.**
+> `esp32-board-bringup` skill. Current position: **Stage 3 complete — interactive
+> Tap Counter app (reusable Button struct, live counter state, correct one-per-tap
+> edge detection using the controller's touch-up event, pressed-while-held
+> feedback). Lesson 03 written. Next up: Stage 3b (framebuffer) for flicker-free
+> scenes + the fading-trail effect, or Stage 4 (LVGL).**
 
 ---
 
@@ -30,6 +30,12 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
       speed-dependent gaps with **linear interpolation** (`drawStroke` connects
       consecutive touch reports). Uses a **timeout** to track a continuous stroke
       because the IRQ pulses (Module 9); settled on `delay(2)` (~40 Hz).
+- [x] **Stage 3 — Interactive Tap Counter** — reusable `Button` struct + generic
+      `inside()`/`drawButton()`; live `counter` state; correct **one-per-tap edge
+      detection** (debounced press/release, using the controller's **touch-up
+      event** — a `count == 0` frame — for crisp release, timeout as fallback);
+      pressed-while-held feedback via a `Button *activeBtn`. Lesson 03 written +
+      snapshot in `docs/lesson-03-interactive/`.
 
 ### Bug fixed (2026-07-14) — native-USB serial freeze/lag
 `Serial.print` on the ESP32-S3's native USB **blocks** when the TX buffer fills
@@ -87,22 +93,23 @@ firmware is back to a clean, shippable state.
 
 ---
 
-## ▶ Stage 3 — Small interactive app   ← NEXT
+## ✅ Stage 3 — Small interactive app (Tap Counter)   [DONE]
 **Goal:** combine display + touch into event-driven behavior.
 
-**Approach:** draw an on-screen "button" (a filled rect + label); detect when a
-touch falls inside its bounds; change its color / increment a counter on tap.
-Teaches hit-testing and simple state, all with primitives (no UI framework yet).
+**Built:** a Tap Counter — reusable `Button` struct, generic `inside()` /
+`drawButton()`, a live `counter`, and correct **one-per-tap** edge detection.
+Getting the edge detection right was the meat (see lesson 03 Module 3): the IRQ
+pulses so `isPressed()` can't be trusted directly → debounced press/release state
+→ used the controller's **touch-up event** (`count == 0` frame) for crisp release,
+with a timeout fallback. Pressed-while-held feedback via `Button *activeBtn`.
 
-**Done when:** tapping the on-screen button visibly reacts.
-
-> Note: Stage 2b's CLEAR button already previews the core of Stage 3 (hit-testing
-> + edge detection). Stage 3 can go further: multiple buttons, on-screen state
-> (a counter), pressed/return visual states.
+**Done:** taps register one-for-one (fast tapping included), holds are solid,
+buttons highlight while pressed. Lesson `docs/lesson-03-interactive.md` +
+snapshot `docs/lesson-03-interactive/main.cpp`.
 
 ---
 
-## Stage 3b — Retained-mode framebuffer (Arduino_Canvas in PSRAM)
+## ▶ Stage 3b — Retained-mode framebuffer (Arduino_Canvas in PSRAM)   ← NEXT
 **Goal:** stop drawing straight to the panel; keep a **saved scene** in memory and
 push it to the display each frame. Unlocks effects that immediate mode can't do
 cleanly: easy clear, **fading / expiring dots** (the "living trail" we deferred),
