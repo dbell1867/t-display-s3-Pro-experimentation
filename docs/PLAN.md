@@ -5,13 +5,13 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 4 complete — LVGL v9.5
-> wired in (two glue callbacks: flush + read), a hand-coded Tap Counter with
-> `LV_EVENT_CLICKED` (one clean increment per tap, no hand-rolled edge detection).
-> Dirty-rectangle rendering dodges the Stage-3b flush ceiling. Fixed a
-> draw-buffer alignment Heisenbug along the way. Lesson 04 written. Next up:
-> Stage 5 — onboard peripherals (sensors / power / buttons) and/or the deferred
-> low-power lesson (touch as a true hardware interrupt).**
+> `esp32-board-bringup` skill. Current position: **Stage 5a complete — SY6970
+> battery gauge. Brought up the charger/power-path IC over the shared I²C bus
+> (XPowersLib, `PowersSY6970` class), read voltage/VBUS/current/charge-state, and
+> built an LVGL bar gauge with a voltage-derived % (honest caveat: not a fuel
+> gauge; 97%→90% on unplug). Lesson 05 written. Next up: Stage 5b — the low-power
+> lesson (touch as a true hardware interrupt + light sleep), using this gauge as
+> the instrument to watch consumption drop.**
 
 ---
 
@@ -170,17 +170,38 @@ native-USB reset). Fix: `__attribute__((aligned(64)))`.
 
 ---
 
-## ▶ Stage 5 — Onboard peripherals / low-power   ← NEXT
-Pick by interest (see the section below): LTR-553 light+proximity, SY6970
-battery/power, the physical buttons + SD card, or the **low-power lesson**
-(design C — touch as a true hardware interrupt so the CPU can light-sleep and
-wake on touch; pairs naturally with the SY6970 battery work).
+## ✅ Stage 5a — Battery gauge (SY6970 PMU)   [DONE]
+**Goal:** an on-screen battery instrument to visualise power for the low-power work.
+
+**Built:** brought up the **SY6970** charger/power-path IC (XPowersLib) on the
+**shared I²C bus** (0x6A, alongside touch's 0x5A — no extra wiring). `PPM.init(Wire,
+5, 6, SY6970_SLAVE_ADDRESS)` + `enableMeasure()` (ADC on), then read
+`getBattVoltage/getVbusVoltage/getChargeCurrent/isVbusIn/isCharging`. Step 1 = raw
+text dump (proved comms: VBUS 5100 mV, Batt 4124 mV, charging). Step 2 = an **LVGL
+gauge** (`lv_bar` with track/indicator parts + colour by level, % + voltage +
+status), refreshed 1 Hz. **% is derived from voltage** via a piecewise LiPo curve —
+NOT a true fuel gauge. Demonstrated the caveat live: 97% on USB → 90% on unplug
+(charge current inflates terminal voltage). Board keeps running on battery.
+
+**Gotcha:** `XPowersPPM` alias only exists if you `-D XPOWERS_CHIP_SY6970`; without
+it the header's `#else` branch defines no alias → *"XPowersPPM not declared."* Fix:
+use the concrete class `PowersSY6970`. Lesson `docs/lesson-05-battery.md` + snapshot
+`docs/lesson-05-battery/main.cpp`.
 
 ---
 
-## Stage 5 — Onboard peripherals (optional, pick by interest)
+## ▶ Stage 5b — Low-power lesson (design C)   ← NEXT
+Convert touch to a **true hardware interrupt** (`attachInterrupt` on GPIO 21 →
+`volatile` flag → read in loop) so the CPU can **light-sleep** and wake on touch —
+and watch the current drop on the Stage-5a gauge. This is the "design C" deferred
+back in Lesson 02 Module 6; the battery gauge is the instrument that makes the win
+visible.
+
+---
+
+## Stage 5 — Other onboard peripherals (optional, pick by interest)
 - **LTR-553** light + proximity sensor (I²C) via SensorLib.
-- **SY6970** power/battery management (I²C `0x6A`) via XPowersLib — read battery %.
+- ~~**SY6970** power/battery management (I²C `0x6A`) via XPowersLib~~ — DONE (5a).
 - **Buttons** (GPIO 0, 12, 16) and **SD card** (SPI, CS 14).
 - **Low-power lesson (design C):** convert touch to a true hardware interrupt
   (`attachInterrupt` on GPIO 21 → `volatile` flag → read in `loop()`) and let the
