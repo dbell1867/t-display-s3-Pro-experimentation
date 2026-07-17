@@ -5,11 +5,13 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 3b complete — retained-mode
-> framebuffer (Arduino_Canvas in octal PSRAM) driving a fading touch trail. Hit and
-> documented the full-frame-flush ceiling (~40 ms/22 fps, no DMA, ~40 MHz cap).
-> PSRAM now enabled in platformio.ini. Lesson 03b written. Next up: Stage 4 (LVGL),
-> which uses dirty-rectangle rendering to avoid exactly that ceiling.**
+> `esp32-board-bringup` skill. Current position: **Stage 4 complete — LVGL v9.5
+> wired in (two glue callbacks: flush + read), a hand-coded Tap Counter with
+> `LV_EVENT_CLICKED` (one clean increment per tap, no hand-rolled edge detection).
+> Dirty-rectangle rendering dodges the Stage-3b flush ceiling. Fixed a
+> draw-buffer alignment Heisenbug along the way. Lesson 04 written. Next up:
+> Stage 5 — onboard peripherals (sensors / power / buttons) and/or the deferred
+> low-power lesson (touch as a true hardware interrupt).**
 
 ---
 
@@ -136,19 +138,43 @@ expiring-dot trail (per-dot timestamps, redraw scene each frame).
 
 ---
 
-## ▶ Stage 4 — Real UX with LVGL   ← NEXT
-**Goal:** build a proper widget-based interface (buttons, sliders, labels, screens).
+## ✅ Stage 4 — Real UX with LVGL   [DONE]
+**Goal:** build a proper widget-based interface (buttons, labels, events).
 
-**Approach:** add LVGL; wire two glue callbacks — a *flush* callback that pushes
-LVGL's pixels via Arduino_GFX, and a *read* callback that feeds it CST226SE touch.
-Then build a screen with real widgets. Optionally design visually in SquareLine or
-EEZ Studio and export.
+**Decisions made:** **LVGL v9** (resolved to 9.5.0; current API over LilyGO's
+pinned v8) and **hand-coded** UI (over a SquareLine/EEZ designer) — the learning
+project wants the fundamentals.
 
-**Open decisions to make here:**
-- LVGL **v8** (matches LilyGO's pinned `8.3.1` examples) vs **v9** (current).
-- Use a GUI designer (SquareLine / EEZ) or hand-code the UI?
+**Built (4 incremental steps, each a checkpoint):**
+1. **Build integration** — `lvgl/lvgl @ ^9.3.0` + a minimal `include/lv_conf.h`
+   found via `-DLV_CONF_INCLUDE_SIMPLE` and `-I include`. Proved `lv_init()`
+   compiles/links in isolation (version shown on-screen).
+2. **Flush callback** — `my_flush_cb` pushes LVGL's dirty rectangles to the panel
+   via `panel->draw16bitRGBBitmap` (`RENDER_MODE_PARTIAL`). Colour/byte order
+   verified correct with R/G/B test bars (no swap needed).
+3. **Read callback** — `my_touch_read_cb` reports CST226SE press state + point
+   (held on release). LVGL does hit-testing / debouncing / click detection.
+4. **Widget app** — a Tap Counter: `lv_button_create` + `lv_obj_add_event_cb(...,
+   LV_EVENT_CLICKED, ...)`. Fires once per tap; fast taps register, holds don't
+   run away — the Stage-3 edge-detection battle, now free.
 
-**Done when:** an LVGL button/slider on screen responds to touch.
+**Bug fixed — draw-buffer alignment Heisenbug:** step 3 hung inside
+`lv_display_set_buffers` (the same call that worked in step 2). Cause: the plain
+`static uint8_t drawBuf[]` was only 1-byte-aligned; adding the touch driver's
+statics shifted it onto a misaligned address, tripping LVGL's alignment assert
+(`while(1)` hang). Diagnosed via on-screen boot markers (serial dies on
+native-USB reset). Fix: `__attribute__((aligned(64)))`.
+
+**Done:** LVGL Tap Counter responds to touch; confirmed on hardware. Lesson
+`docs/lesson-04-lvgl.md` + snapshot `docs/lesson-04-lvgl/` (main.cpp + lv_conf.h).
+
+---
+
+## ▶ Stage 5 — Onboard peripherals / low-power   ← NEXT
+Pick by interest (see the section below): LTR-553 light+proximity, SY6970
+battery/power, the physical buttons + SD card, or the **low-power lesson**
+(design C — touch as a true hardware interrupt so the CPU can light-sleep and
+wake on touch; pairs naturally with the SY6970 battery work).
 
 ---
 
