@@ -5,14 +5,14 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 5c complete — backlight
-> power. PWM backlight (LEDC) + LTR-553 light/proximity sensor (3rd chip on the
-> shared I²C bus) driving auto-brightness (constrain/map + smoothing + floor) and a
-> screen-off idle timeout that wakes on touch or proximity. Light-sleep only when
-> the screen is off (PWM/sleep-clock interaction); idle CPU rate captured for
-> display (idle:1 battery / 178 USB). Lesson 05c written. Next up (pick by
-> interest): deep sleep, an inline USB power meter for real mA, other peripherals
-> (buttons, SD), or the lv_timer refactor.**
+> `esp32-board-bringup` skill. Current position: **Stage 5d complete — deep sleep.
+> A "Deep Sleep" button powers the chip to the RTC domain (~µA); wakes on the touch
+> line (EXT1 on RTC-GPIO 21) or a 20 s timer, then REBOOTS. RTC_DATA_ATTR boot
+> counter survives (1→2→3) while RAM is wiped; wake cause (touch/timer) reported.
+> Backlight held low through sleep. Power ladder now complete: busy-poll → light
+> sleep (~mA) → deep sleep (~µA). Lesson 05d written. Next up (pick by interest):
+> inline USB power meter for real mA, other peripherals (buttons, SD), a richer
+> LVGL screen, or the lv_timer refactor.**
 
 ---
 
@@ -241,11 +241,35 @@ the idle loops/sec while asleep** and show it on wake — `idle:1` on battery,
 
 ---
 
+## ✅ Stage 5d — Deep sleep   [DONE]
+**Goal:** the deepest power state — power down to the RTC domain (~tens of µA),
+wake by rebooting.
+
+**Built:** a **"Deep Sleep" button** (kept the always-on gauge's light-sleep idle
+behaviour intact). Tapping it → `esp_deep_sleep_start()`. Wake sources: **EXT1** on
+the touch line (GPIO 21, an RTC-capable pad; S3 dropped EXT0) via
+`ESP_EXT1_WAKEUP_ANY_LOW` + RTC pull-up, and a **20 s timer**. On wake the chip
+**reboots** (`setup()` re-runs, all peripherals re-init). A **`RTC_DATA_ATTR`
+bootCount** survives (proven: climbed 1→2→3 while RAM was wiped) and
+`esp_sleep_get_wakeup_cause()` reports the reason (**woke: touch / timer** — both
+confirmed). Backlight (GPIO 48, non-RTC) driven low + `gpio_hold_en` /
+`gpio_deep_sleep_hold_en` so it stays off through sleep (released on next boot).
+Waited for finger-release before sleeping to avoid instant re-wake.
+
+**Honest note:** ~tens of µA is below what the on-board SY6970 can show; the proof
+is behavioural (reboot + surviving counter + wake cause). Real µA needs an inline
+USB meter. Lesson `docs/lesson-05d-deep-sleep.md` + snapshot
+`docs/lesson-05d-deep-sleep/main.cpp`.
+
+**Power ladder complete:** busy-poll (~178 loops/s) → light sleep (resume, ~mA) →
+deep sleep (reboot, ~µA).
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
-- **Deep sleep** for the lowest floor (needs RTC-GPIO / ext wake; peripherals
-  re-init on wake).
 - **Real mA numbers:** an inline USB power meter to quantify all the power work.
 - Other onboard peripherals: physical buttons (GPIO 0/12/16), SD card (SPI CS 14).
+- Circle back to UI: a richer LVGL screen / multiple screens.
 - Small LVGL exercise still open: swap the `millis()` throttle for `lv_timer_create`.
 
 ---
