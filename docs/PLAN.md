@@ -5,14 +5,14 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 5b complete — low-power
-> lesson. CPU light-sleeps when idle and wakes on the touch line (GPIO level +
-> 1 s timer), gated to battery-only. Measured on an on-screen activity instrument:
-> CPU loop activity 178 → 1 /sec on battery, instant touch wake. Learned ISR rules
-> (IRAM_ATTR/volatile), phantom-edge pull-up fix, and the honest caveat that
-> loops/sec ≠ mA (backlight dominates). Lesson 05b written. Next up (pick by
-> interest): backlight power (PWM dim + LTR-553 sensor), deep sleep, or other
-> peripherals.**
+> `esp32-board-bringup` skill. Current position: **Stage 5c complete — backlight
+> power. PWM backlight (LEDC) + LTR-553 light/proximity sensor (3rd chip on the
+> shared I²C bus) driving auto-brightness (constrain/map + smoothing + floor) and a
+> screen-off idle timeout that wakes on touch or proximity. Light-sleep only when
+> the screen is off (PWM/sleep-clock interaction); idle CPU rate captured for
+> display (idle:1 battery / 178 USB). Lesson 05c written. Next up (pick by
+> interest): deep sleep, an inline USB power meter for real mA, other peripherals
+> (buttons, SD), or the lv_timer refactor.**
 
 ---
 
@@ -218,12 +218,35 @@ deep sleep, inline USB power meter for true mA. Lesson `docs/lesson-05b-low-powe
 
 ---
 
+## ✅ Stage 5c — Backlight power + LTR-553 auto-brightness   [DONE]
+**Goal:** attack the biggest remaining power draw (the backlight) with PWM dimming,
+auto-brightness from ambient light, and screen-off-when-idle.
+
+**Built (3 steps):** (1) **PWM backlight** via LEDC core-3.x API
+(`ledcAttach(TFT_BL, 5000, 8)` + `ledcWrite(pin, duty)`) — dimmable, flicker-free.
+(2) **LTR-553** light+proximity sensor (SensorLib `SensorLTR553`, I²C **0x23** — a
+3rd chip on the shared SDA5/SCL6 bus): `enableLightSensor()` + `enableProximity()`,
+read `getLightSensor(0)` / `getProximity()`. (3) **Auto-brightness** (constrain+map
+ambient→duty, EMA smoothing, readability floor) + **screen-off idle timeout**
+(`BL_OFF_MS`=5 s) waking on **touch or proximity** (PS is short-range, ~3 cm /
+cover; `PROX_WAKE`=30).
+
+**Key interaction:** light-sleep **only when the screen is off** — a PWM backlight's
+clock gates during light sleep, glitching mid-level duty; duty 0 (steady low) is
+glitch-free, and that's when the big win lands (screen dark + CPU asleep together).
+**Observability fix:** the CPU counter is on the screen we turn off, so we **capture
+the idle loops/sec while asleep** and show it on wake — `idle:1` on battery,
+`idle:178` on USB (the battery-gate made visible). Lesson
+`docs/lesson-05c-backlight.md` + snapshot `docs/lesson-05c-backlight/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
-- **Backlight power (biggest remaining lever):** PWM-dim or turn off the backlight
-  (GPIO 48) after an idle timeout; pairs with the **LTR-553** light/proximity
-  sensor (I²C, SensorLib) for auto-brightness + proximity-wake.
-- **Deep sleep** for the lowest floor (needs RTC-GPIO / ext wake).
+- **Deep sleep** for the lowest floor (needs RTC-GPIO / ext wake; peripherals
+  re-init on wake).
+- **Real mA numbers:** an inline USB power meter to quantify all the power work.
 - Other onboard peripherals: physical buttons (GPIO 0/12/16), SD card (SPI CS 14).
+- Small LVGL exercise still open: swap the `millis()` throttle for `lv_timer_create`.
 
 ---
 
