@@ -5,13 +5,14 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 5a complete — SY6970
-> battery gauge. Brought up the charger/power-path IC over the shared I²C bus
-> (XPowersLib, `PowersSY6970` class), read voltage/VBUS/current/charge-state, and
-> built an LVGL bar gauge with a voltage-derived % (honest caveat: not a fuel
-> gauge; 97%→90% on unplug). Lesson 05 written. Next up: Stage 5b — the low-power
-> lesson (touch as a true hardware interrupt + light sleep), using this gauge as
-> the instrument to watch consumption drop.**
+> `esp32-board-bringup` skill. Current position: **Stage 5b complete — low-power
+> lesson. CPU light-sleeps when idle and wakes on the touch line (GPIO level +
+> 1 s timer), gated to battery-only. Measured on an on-screen activity instrument:
+> CPU loop activity 178 → 1 /sec on battery, instant touch wake. Learned ISR rules
+> (IRAM_ATTR/volatile), phantom-edge pull-up fix, and the honest caveat that
+> loops/sec ≠ mA (backlight dominates). Lesson 05b written. Next up (pick by
+> interest): backlight power (PWM dim + LTR-553 sensor), deep sleep, or other
+> peripherals.**
 
 ---
 
@@ -190,12 +191,39 @@ use the concrete class `PowersSY6970`. Lesson `docs/lesson-05-battery.md` + snap
 
 ---
 
-## ▶ Stage 5b — Low-power lesson (design C)   ← NEXT
-Convert touch to a **true hardware interrupt** (`attachInterrupt` on GPIO 21 →
-`volatile` flag → read in loop) so the CPU can **light-sleep** and wake on touch —
-and watch the current drop on the Stage-5a gauge. This is the "design C" deferred
-back in Lesson 02 Module 6; the battery gauge is the instrument that makes the win
-visible.
+## ✅ Stage 5b — Low-power lesson (design C)   [DONE]
+**Goal:** CPU **light-sleeps** when idle and **wakes on touch**, instead of
+busy-polling ~178×/sec. The "design C" deferred since Lesson 02 Module 6.
+
+**Built (3 steps):** (1) an on-screen **activity instrument** (`loops/sec`) to
+read a baseline — ~178/s, constant even untouched. (2) **`attachInterrupt`** on
+GPIO 21 (`IRAM_ATTR` ISR, `volatile` flag) — proved the touch line fires; found
+**phantom idle edges** → fixed the floating pin with `INPUT_PULLUP` (a small
+residual creep remained = controller heartbeat + our own polling). (3)
+**`esp_light_sleep_start()`** with **GPIO level-LOW + 1 s timer** wake sources;
+gated to sleep **only on battery** (`!isVbusIn`, cached) to dodge native-USB
+re-enumeration and mirror real devices; `IDLE_SLEEP_MS`=400 guard + no-sleep-
+during-animation. Level wake (not edge) so we dropped the edge ISR to avoid
+fighting over the pin's interrupt type.
+
+**Result (on battery, idle):** CPU **178 → 1 /s** (~99.4% less loop activity),
+**Wakes 1/s** (timer only — the idle creep vanished because we stop polling while
+asleep), touch **instant + responsive**, returns to 178 on touch/replug.
+
+**Honest caveat:** loops/sec = CPU activity, NOT mA. Light sleep cuts CPU current
+(tens of mA → ~1–2 mA) but the **backlight dominates** and stays on — real battery
+gain, not 178×. Next levers: dim/kill backlight when idle (LTR-553 / timeout),
+deep sleep, inline USB power meter for true mA. Lesson `docs/lesson-05b-low-power.md`
++ snapshot `docs/lesson-05b-low-power/main.cpp`.
+
+---
+
+## ▶ Next — pick by interest   ← NEXT
+- **Backlight power (biggest remaining lever):** PWM-dim or turn off the backlight
+  (GPIO 48) after an idle timeout; pairs with the **LTR-553** light/proximity
+  sensor (I²C, SensorLib) for auto-brightness + proximity-wake.
+- **Deep sleep** for the lowest floor (needs RTC-GPIO / ext wake).
+- Other onboard peripherals: physical buttons (GPIO 0/12/16), SD card (SPI CS 14).
 
 ---
 
