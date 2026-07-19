@@ -5,14 +5,19 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 5d complete — deep sleep.
-> A "Deep Sleep" button powers the chip to the RTC domain (~µA); wakes on the touch
-> line (EXT1 on RTC-GPIO 21) or a 20 s timer, then REBOOTS. RTC_DATA_ATTR boot
-> counter survives (1→2→3) while RAM is wiped; wake cause (touch/timer) reported.
-> Backlight held low through sleep. Power ladder now complete: busy-poll → light
-> sleep (~mA) → deep sleep (~µA). Lesson 05d written. Next up (pick by interest):
-> inline USB power meter for real mA, other peripherals (buttons, SD), a richer
-> LVGL screen, or the lv_timer refactor.**
+> `esp32-board-bringup` skill. Current position: **Stage 5e complete — inline USB
+> power meter. A "Bench" button walks five held power states (A poll+BL100 / B
+> poll+BLoff / C light sleep / D +display off / E deep sleep timer-only) so a slow
+> meter can settle. Real numbers at last: 129 / 111 / 80 / 71 / 78 mA, RESET floor
+> 66 mA. Findings: the backlight is NOT dominant (18 mA) — a busy CPU costs 31 mA;
+> deep sleep saves only 2 mA over light sleep and is 12 mA WORSE than holding RESET
+> (the price of wake-on-touch); and ~69 mA (53%) is not reachable from firmware and
+> remains UNEXPLAINED. Shipped win: ST7796 SLPIN via panel->displayOff() in the idle
+> path (9 mA) — we'd only ever turned off the backlight. Lesson 05e written.
+> OPEN BUGS: (1) deep-sleep touch wake fires instantly (`woke: touch`) — three
+> hypotheses tried and all failed; next step is to BISECT, not guess. (2) the
+> unexplained 69 mA. Next up (pick by interest): those two, or buttons / SD card /
+> LVGL flex-grid refactor.**
 
 ---
 
@@ -266,10 +271,73 @@ deep sleep (reboot, ~µA).
 
 ---
 
+## ✅ Stage 5e — Inline USB power meter   [DONE]
+
+A "Bench" button holds one power state still (announce 4 s at full brightness, then
+settle; any touch advances) so a slow USB meter can settle on it.
+
+| State | Meter | Δ = cost of… |
+|---|---|---|
+| A: poll + BL 100% | 129 mA | |
+| B: poll + BL off | 111 mA | backlight **18 mA** (14%) |
+| C: light sleep | 80 mA | busy CPU **31 mA** (24%) |
+| D: + display off (SLPIN) | 71 mA | ST7796 scanning **9 mA** (7%) |
+| E: deep sleep (timer only) | 78 mA | rest of chip ≈ **2 mA** (display still awake) |
+| RESET held | 66 mA | ESP32 running at all ≈ 12 mA |
+| unexplained floor | ~69 mA | **53% — not reachable from firmware** |
+
+**What this overturned:** the backlight is *not* dominant (a busy CPU costs ~2×);
+deep sleep buys 2 mA over light sleep and is 12 mA *worse* than holding RESET (the
+price of keeping `ESP_PD_DOMAIN_RTC_PERIPH` powered for wake-on-touch); and Stages
+5b–5d optimised ~47% of the problem — **loops/sec cannot see a load that isn't the CPU.**
+
+**Shipped:** `applyScreenPower()` now sends ST7796 `SLPIN` (`panel->displayOff()`)
+alongside the backlight in the idle path — 9 mA we'd been leaving on the table since
+05c. Order matters: dark before SLPIN; `lv_obj_invalidate` + `lv_refr_now` before
+lighting back up (SLPIN discards the frame buffer).
+
+**One confusion, three bugs.** We'd conflated "the backlight" (a PWM pin) with "the
+display" (a separate chip with its own power state and memory) since Stage 1. That
+caused: 9 mA wasted while "off", **white noise on wake**, and **white noise on
+power-on**. Wake fix: `displayOn()` → `fillScreen(RGB565_BLACK)` → invalidate +
+`lv_refr_now` → *then* backlight. Sequencing the repaint to beat the backlight was a
+**race** (~40 ms full-frame, non-DMA SPI); wiping the random GRAM is a guarantee —
+*prefer eliminating a bad state over sequencing around it.* Boot fix: `setup()` was
+doing `setBacklight(autoBrightness)` **before** `panel->begin()`; backlight now held
+at 0 through bring-up and raised only after `lv_refr_now()` renders the first frame.
+**Rule: never illuminate a buffer you haven't drawn.** Tradeoff: ~1 s of black at
+boot instead of noise — a splash screen after `fillScreen` would cover it.
+
+**Also:** screen auto-off now gated on `!onUsbCached` (it made slow values
+impossible to watch while tethered); buttons moved to one row after the Bench button
+was placed on top of `bootLabel` — `lv_obj_align` has no collision detection.
+
+**Caveat on the RESET floor:** it is *not* a hardware floor. Holding RESET stops the
+ESP32 but leaves every other chip in whatever state firmware left it — the ST7796
+was still scanning. Mode D (CPU alive, display asleep) nearly matches it.
+
+Lesson `docs/lesson-05e-power-meter.md` + snapshot `docs/lesson-05e-power-meter/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
-- **Real mA numbers:** an inline USB power meter to quantify all the power work.
+- **🐛 OPEN: deep-sleep touch wake fires instantly** (`woke: touch`). Three
+  hypotheses tried, all failed — heartbeat (line measured perfectly quiet, 500 ms =
+  the function's minimum), missing `rtc_gpio_init()`, and `RTC_PERIPH` powered down
+  + floating `TOUCH_RST`. All three are correct necessary fixes and are now in the
+  code; none was the bug. **Next step is to BISECT, not guess:** arm EXT1 with no
+  pull-up configured at all, and separately on an unconnected pin, to prove whether
+  the wake comes from the pin's electrical state or the wake source's config.
+  Timer-only deep sleep (bench mode E) works fine.
+- **🔍 OPEN: the unexplained ~69 mA** (53% of total draw). Too much for a power LED
+  + regulator quiescent. Needs the schematic and a meter on the 3.3 V rail.
+- **Flash hazard worth fixing:** a sleeping CPU doesn't service USB CDC, so upload
+  fails with `OSError: [Errno 71] Protocol error` (recover: RESET, or BOOT+RESET).
+  A short "flash window" at the top of `setup()` before any sleeping would prevent it.
 - Other onboard peripherals: physical buttons (GPIO 0/12/16), SD card (SPI CS 14).
-- Circle back to UI: a richer LVGL screen / multiple screens.
+- Circle back to UI: a richer LVGL screen / multiple screens. The gauge screen now
+  hand-aligns ~9 widgets by absolute y-offset and has already produced one
+  invisible-overlap bug — a good argument for LVGL flex/grid containers.
 - Small LVGL exercise still open: swap the `millis()` throttle for `lv_timer_create`.
 
 ---
