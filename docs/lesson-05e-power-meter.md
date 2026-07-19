@@ -87,49 +87,74 @@ collection.*
 
 ---
 
-## Module 3 — The numbers
+## Module 3 — The numbers (and the four times the apparatus lied)
 
-Battery full (`I` = 0), meter inline on USB:
+The first run looked clean and produced a confident, **wrong** conclusion. Getting
+to trustworthy numbers took four corrections — and every one of them was the
+measurement setup, not the board.
 
-| State | Meter | Δ = cost of… | Share |
-|---|---|---|---|
-| A: poll + BL 100% | 129 mA | | |
-| B: poll + BL off | 111 mA | **backlight** = 18 mA | 14% |
-| C: light sleep | 80 mA | **busy CPU** = 31 mA | 24% |
-| D: + display off | 71 mA | **ST7796 scanning** = 9 mA | 7% |
-| E: deep sleep¹ | 78 mA | rest of chip ≈ 2 mA | 1.5% |
-| RESET held | 66 mA | ESP32 running at all ≈ 12 mA | |
-| **unexplained floor** | **~69 mA** | | **53%** |
+### The final, reproducible figures
 
-¹ E measured with the display still awake, hence above D.
+Powered from a **dumb charger** (no USB host), **charging disabled** for the run:
 
-### What this overturned
+| State | Meter | Δ = cost of… |
+|---|---|---|
+| A: poll + BL 100% | 94–120 mA ⚠ | |
+| B: poll + BL off | 74 mA | backlight ≈ 18–20 mA ⚠ |
+| C: light sleep | 41 mA | **busy CPU 33 mA** |
+| D: + display off | 30 mA | **ST7796 11 mA** |
+| E: + touch/ALS off | 29 mA | touch + ALS ≈ 1 mA |
+| **F: deep sleep, all off** | **27 mA** | rest of chip ≈ 2 mA |
 
-- **The backlight does not dominate.** Received wisdom on ESP32 boards is "the
-  screen is everything." Here a busy CPU (31 mA) costs nearly twice the backlight
-  (18 mA). The prediction going in was the opposite.
-- **Deep sleep saves 2 mA over light sleep** on this board — and is *12 mA worse
-  than simply holding the chip in RESET*. Deep sleep isn't free: the RTC domain,
-  the RTC timer, and the pull-up domain we keep powered for touch-wake
-  (`ESP_PD_DOMAIN_RTC_PERIPH`) all cost. We bought wake-on-touch, and 12 mA is its
-  price. A real tradeoff, visible only because we measured.
-- **Over half the draw is not reachable from our code.** Stages 5b–5d were honest
-  about what they controlled, but they optimised ~47% of the problem while 53% sat
-  unexamined. **Loops/sec cannot see a load that isn't the CPU.**
+**≈71% of the draw is reachable from firmware.** The floor is **27 mA** — a
+plausible figure for regulator quiescent, the status LED, panel bias and sleeping
+I²C parts. No mystery requiring a schematic.
 
-### On the RESET floor
+⚠ **The high-current rows are not reproducible.** Mode A measured 94 and then
+120 mA on *identical* settings. Likely mechanism (hypothesis, untested): the SY6970
+is a **power-path** chip with an input current limit, and near that limit the
+**battery supplements** the load. The meter reads *input* current, which equals the
+load only while the battery is neither supplementing nor absorbing. Below ~40 mA
+every reading reproduced exactly; above ~90 mA they wander. So: **trust the
+sleep-state numbers, treat the backlight as ≈18–20 mA, and don't quote A.**
 
-Holding RESET stops the **ESP32** — but every other chip keeps whatever state
-firmware last left it in. The ST7796 was initialised and still scanning. So 66 mA
-is *not* a hardware floor; it's "CPU halted, peripherals still running." Firmware
-can beat it: mode D (71 mA) has the CPU alive and the display asleep, which is why
-D and RESET are so close. **A command sent before sleeping can beat halting the
-processor.**
+### The four artifacts
 
-The remaining ~69 mA is too much for a power LED and regulator quiescent draw.
-Something on this board isn't understood yet. Saying so is better than inventing
-an explanation — the honest next step is the schematic and a meter on the 3.3 V
-rail, not more guessing.
+1. **Battery charge current** (~35 mA, variable). The meter sits *upstream of the
+   PMU*, so charging is included, and even a "full" battery top-off cycles at
+   unpredictable moments. Detected because `A − B` — a fixed difference between two
+   pinned backlight duties — came out 18, then 6, then 20. Fixed with
+   `PPM.disableCharge()` for the duration of the bench.
+2. **The USB host link** (~26–35 mA). The S3's USB PHY stays powered and the
+   enumerated link stays alive, *including through deep sleep*. Present in every
+   early reading, and it looked exactly like an immovable hardware floor. Fixed by
+   powering from a dumb charger. **This was larger than the backlight.**
+3. **The instrument's own I²C polling** (31 mA) — mode E kept calling
+   `touch.getPoint()` on a controller it had just put to sleep. See Module 5.
+4. **A defeated sleep** (also mode E) — the level-triggered wake fired instantly on
+   a line that was already low, so the CPU never actually slept.
+
+### What the first run got wrong
+
+The original conclusion — *"the backlight isn't dominant, deep sleep saves 2 mA,
+and 53% of the draw is unreachable from firmware"* — was an artifact. That 53%
+"unreachable floor" was mostly a USB host and a charging battery. Corrected: the
+**busy CPU is the largest firmware-controllable load** (33 mA), the backlight is
+second (~18–20), the display controller third (11), and the real floor is 27 mA.
+
+One conclusion did survive: **loops/sec cannot see a load that isn't the CPU.**
+Stages 5b–5d measured the right thing for what they controlled, but had no way to
+see the display controller, the charger, or the USB link.
+
+### On the RESET floor (a measurement that misleads)
+
+An early reading held RESET down (66 mA, on the PC) and I called it "the number no
+firmware change can ever beat." **Wrong.** Holding RESET stops the *ESP32*; every
+other chip keeps whatever state firmware last left it in — the ST7796 was still
+scanning. It isn't a hardware floor, it's "CPU halted, peripherals running", and
+mode D (CPU alive, display asleep) beats it. **A command sent before sleeping can
+beat halting the processor.**
+
 
 ---
 
@@ -212,7 +237,7 @@ peripheral init — worth adding if the dead second bothers you.
 
 ---
 
-## Module 5 — Two bugs, and how they were found
+## Module 5 — Two bugs, and how they were finally found
 
 **A layout bug that hid the evidence.** The new Bench button was placed at
 `BOTTOM_MID -60`, landing exactly on `bootLabel` at y=378 — the wake-reason readout
@@ -221,28 +246,54 @@ collision detection**: nothing warns you, the button just draws on top and the
 loser is invisible. Hand-tuning y-offsets across eight widgets is a sign the screen
 has outgrown manual alignment; LVGL's flex/grid containers would have caught it.
 
-**A deep-sleep wake bug, still open.** Tapping Sleep woke instantly with
-`woke: touch`. Three hypotheses, three failures:
+**The deep-sleep wake bug — solved, but not by guessing.** Tapping Sleep woke
+instantly with `woke: touch`. Three hypotheses, three failures:
 
-1. *Touch controller heartbeat.* Fixed the guard to watch the **pin** rather than
+1. *Touch controller heartbeat.* Rewrote the guard to watch the **pin** rather than
    `getPoint()` (EXT1 watches the line, not fingers) and drain the controller.
-   Result: `IRQ settled in 500 ms` — the minimum possible. **No chatter at all.**
-   Theory dead.
+   Result: `IRQ settled in 500 ms` — the function's own minimum. **No chatter at
+   all.** Theory dead.
 2. *RTC pad never initialised.* `rtc_gpio_pullup_en()` has no effect until
-   `rtc_gpio_init()` switches the pad to its RTC function. Added it. **Still woke.**
+   `rtc_gpio_init()` switches the pad to its RTC function. Added. **Still woke.**
 3. *RTC_PERIPH powered down + floating touch RESET.* Internal pull-ups live in a
    domain deep sleep switches off (`esp_sleep_pd_config(..., ESP_PD_OPTION_ON)`),
-   and a floating `TOUCH_RST` lets the CST226SE reset itself — a just-reset touch
-   controller asserts IRQ. Added both. **Still woke.**
+   and a floating `TOUCH_RST` lets the CST226SE reset and assert IRQ. Added both.
+   **Still woke.**
 
-All three are correct, necessary fixes that any working deep-sleep-on-touch needs.
-None of them was *the* bug. The lesson is the process failure: after three
-hypothesis-driven attempts, the right move was to stop pattern-matching and start
-**bisecting** — arm EXT1 with no pull-up configured at all, and separately arm it on
-an unconnected pin, to prove whether the wake comes from the pin's electrical state
-or the wake source's configuration. **Unresolved — see PLAN.md.**
+All three are correct, necessary fixes for any working deep-sleep-on-touch, and all
+are in the code. None was *the* bug.
 
-Timer-only deep sleep (mode E) works correctly.
+**What actually found it was a power measurement.** Mode E (touch controller
+asleep) read 60 mA — *above* mode D, which has strictly less turned off. That's the
+signature of a CPU that never sleeps. Our light-sleep wake is level-triggered on the
+same line:
+
+```cpp
+gpio_wakeup_enable((gpio_num_t)TOUCH_IRQ, GPIO_INTR_LOW_LEVEL);
+```
+
+Sleeping on the timer alone dropped E to **29 mA**, below D — proving the line sits
+**LOW** whenever the controller isn't being serviced.
+
+**Root cause:** the CST226SE asserts IRQ when it has a report and **holds it low
+until someone reads it**. While we're awake we poll constantly, draining every
+report, so the line looks perfectly quiet — which is why the guard in attempt 1
+honestly measured 500 ms of calm. The instant we stop polling in order to sleep, the
+next event asserts IRQ with nobody to clear it, the line latches low, and `ANY_LOW`
+fires immediately.
+
+Every hypothesis assumed something was *pulling* the line down. It was simply never
+being *released*. The same mechanism retroactively explains 5b's "residual wake
+creep" and mode E in one stroke.
+
+> **The lesson:** after three hypothesis-driven misses, the answer came from an
+> unrelated measurement that didn't fit. Pattern-matching against known gotchas is
+> fast but has no stopping condition; a number that contradicts the model is worth
+> more than another plausible theory. An "impossible" reading (E above D) is a gift.
+
+**Consequence for the design:** a touch controller is a poor deep-sleep wake source,
+because it holds its interrupt asserted precisely when nobody is listening. A
+physical button is a clean line with nothing holding it — which is the next stage.
 
 ---
 
@@ -258,6 +309,13 @@ Timer-only deep sleep (mode E) works correctly.
   with `OSError: [Errno 71] Protocol error`. Recovery is **RESET**, or **BOOT +
   RESET** for the ROM bootloader. A "flash window" at the top of `setup()` — a
   couple of seconds before any sleeping is allowed — prevents it.
+- **Measure on a dumb charger, not your PC.** The USB host link costs more than the
+  backlight on this board, and it hides in every reading taken over a dev cable.
+- **Disable charging for the run** (`PPM.disableCharge()`), and re-enable on exit.
+  A "full" battery still top-off cycles, and it lands mid-reading.
+- **Sanity-check with a difference that shouldn't move.** `A − B` is two pinned
+  backlight duties; if it isn't the same every run, something uncontrolled is
+  moving and no other number in the set can be trusted yet.
 
 ---
 
@@ -266,12 +324,16 @@ Timer-only deep sleep (mode E) works correctly.
 - ✅ Understood what an inline USB meter measures — and why **charge current** ruins it
 - ✅ Built a **power bench** that holds states still for a slow instrument
 - ✅ Measured by **differences**; put real mA on Stages 5b–5d
-- ✅ Found the backlight is **not** dominant, and deep sleep buys **2 mA** here
-- ✅ Shipped **`SLPIN`** into the idle path — 9 mA, the biggest single win of the day
+- ✅ Found and removed **four measurement artifacts** — charge current, the USB host
+  link, the instrument's own I²C polling, and a defeated sleep
+- ✅ Established the real budget: **busy CPU 33 mA > backlight ~18–20 > ST7796 11**,
+  floor **27 mA**, ≈71% reachable from firmware
+- ✅ Shipped **`SLPIN`** into the idle path — 11 mA we'd been leaving on the table
 - ✅ Fixed white noise on **wake** and on **power-on** — the same conflation, twice
 - ✅ Learned to **erase a bad state rather than sequence around it** (guarantee > race)
-- ✅ Learned that **53% of this board's draw is not reachable from firmware**
-- ✅ Learned when to stop hypothesising and start **bisecting**
+- ✅ **Solved the deep-sleep wake bug** — via a power reading that contradicted the model
+- ✅ Learned that **a measurement you haven't controlled is a hypothesis with a
+  number attached**
 
 ## Command cheat-sheet
 
@@ -290,11 +352,14 @@ pio run -d ~/Work/Micro/tdisplay -t upload
 - **`ESP_PD_DOMAIN_RTC_PERIPH`** — the power domain holding RTC pad pull-ups.
 - **`rtc_gpio_init`** — switches a pad from its digital function to its RTC function.
 - **Bisecting** — narrowing a bug by controlled elimination rather than by guessing causes.
+- **Power path / supplement mode** — a PMU that lets the battery help supply the load;
+  input current then no longer equals the load.
+- **Measurement artifact** — a reading caused by the apparatus rather than the subject.
 
 ## Next lesson
 
-Two open threads: the **unexplained ~69 mA** (schematic, LED, a meter on the 3.3 V
-rail) and the **deep-sleep touch-wake bug** (bisect the wake source). Or leave power
-behind for the physical **buttons** (GPIO 0/12/16), the **SD card** (SPI CS 14), or
-an LVGL refactor onto flex/grid containers — which the layout collision above argues
-for on its own.
+**Button wake** (GPIO 0/12/16). Module 5 showed a touch controller is a poor
+deep-sleep wake source — it holds its interrupt asserted exactly when nobody is
+listening. A physical button is a clean line with nothing holding it, it's
+RTC-capable on the S3, and it doubles as the first of the board's remaining
+peripherals. After that: the SD card (SPI CS 14), or an LVGL flex/grid refactor.

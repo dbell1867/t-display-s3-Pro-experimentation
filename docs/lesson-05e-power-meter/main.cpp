@@ -122,7 +122,8 @@ enum BenchMode : uint8_t {
   BENCH_BL_OFF,         // B: busy-poll CPU + backlight off  -> cost of the SCREEN
   BENCH_LIGHT_SLEEP,    // C: light sleep    + backlight off  -> cost of the CPU
   BENCH_DISP_SLEEP,     // D: light sleep + ST7796 SLPIN -> cost of the DISPLAY CONTROLLER
-  BENCH_DEEP_SLEEP,     // E: deep sleep, TIMER wake only -> holds still to be measured
+  BENCH_ALL_OFF,        // E: D + touch asleep + ALS off  -> cost of the I2C PERIPHERALS
+  BENCH_DEEP_SLEEP,     // F: E + deep sleep -> the true FIRMWARE FLOOR (rest is hardware)
   BENCH_COUNT
 };
 #define BENCH_ANNOUNCE_MS 4000
@@ -131,6 +132,11 @@ static uint8_t   benchMode      = BENCH_OFF;
 static uint32_t  benchEnteredMs = 0;
 static bool      benchTouchPrev = false;
 static bool      dispAsleep     = false;   // ST7796 currently in SLPIN (bench mode D)
+static bool      periphOff      = false;   // touch + ALS shut down (bench modes E/F)
+
+// Shut down the I2C peripherals. One-way: the CST226SE may need a power cycle to
+// come back, which is fine because every mode that calls this ends in a reboot.
+static void peripheralsOff(void);
 static lv_obj_t *benchLabel     = NULL;
 
 static const char *benchName(uint8_t m) {
@@ -139,7 +145,8 @@ static const char *benchName(uint8_t m) {
     case BENCH_BL_OFF:      return "B: poll + BL off";
     case BENCH_LIGHT_SLEEP: return "C: light sleep";
     case BENCH_DISP_SLEEP:  return "D: +display off";
-    case BENCH_DEEP_SLEEP:  return "E: deep sleep 20s";
+    case BENCH_ALL_OFF:     return "E: +touch/ALS off";
+    case BENCH_DEEP_SLEEP:  return "F: deep sleep 20s";
     default:                return "";
   }
 }
@@ -261,8 +268,24 @@ static void updateGauge(void) {
 
   const char *st = !vin ? "On battery" : (chg ? "Charging" : "Charged");
   lv_label_set_text(statusLabel, st);
-  lv_label_set_text_fmt(detailLabel, "VBUS %u mV   I %u mA",
-                        PPM.getVbusVoltage(), PPM.getChargeCurrent());
+  // A BLINKING red charge LED means the SY6970 is in a FAULT/retry loop, not
+  // charging normally — and a charger that keeps retrying draws current in bursts
+  // the meter reports as a raised average. Ask the chip which fault it is.
+  uint8_t fault = PPM.getFaultStatus();
+  if (fault) {
+    lv_label_set_text_fmt(detailLabel, "FAULT %02X %s%s%s%s%s", fault,
+                          PPM.isWatchdogFault() ? "WD "    : "",
+                          PPM.isBoostFault()    ? "BOOST " : "",
+                          PPM.isChargeFault()   ? "CHG "   : "",
+                          PPM.isBatteryFault()  ? "BAT "   : "",
+                          PPM.isNTCFault()      ? "NTC "   : "");
+    lv_obj_set_style_text_color(detailLabel, lv_color_hex(0xE04040), LV_PART_MAIN);
+  } else {
+    lv_label_set_text_fmt(detailLabel, "VBUS %u mV   I %u mA  %s",
+                          PPM.getVbusVoltage(), PPM.getChargeCurrent(),
+                          PPM.getNTCStatusString());
+    lv_obj_set_style_text_color(detailLabel, lv_color_hex(0x808088), LV_PART_MAIN);
+  }
 
   if (alsOk) {
     int light = als.getLightSensor(0);
@@ -374,14 +397,16 @@ static void build_ui(void) {
 }
 
 // ---- Enter light sleep, waking on the touch line OR the 1 s timer -----------
-static void enterLightSleep(void) {
+static void enterLightSleep(bool touchWake) {
   esp_sleep_enable_timer_wakeup(SLEEP_TIMER_US);
-  gpio_wakeup_enable((gpio_num_t)TOUCH_IRQ, GPIO_INTR_LOW_LEVEL);  // touch pulses LOW
-  esp_sleep_enable_gpio_wakeup();
+  if (touchWake) {
+    gpio_wakeup_enable((gpio_num_t)TOUCH_IRQ, GPIO_INTR_LOW_LEVEL);  // touch pulses LOW
+    esp_sleep_enable_gpio_wakeup();
+  }
 
   esp_light_sleep_start();          // ---- CPU halts here until a wake event ----
 
-  gpio_wakeup_disable((gpio_num_t)TOUCH_IRQ);
+  if (touchWake) gpio_wakeup_disable((gpio_num_t)TOUCH_IRQ);
   wakeCount++;
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
     lastActivityMs = millis();      // woken by touch: stay up to service it
@@ -394,7 +419,22 @@ static void deepsleep_event_cb(lv_event_t *e) { wantDeepSleep = true; }
 
 // ---- Stage 5e: power bench --------------------------------------------------
 // Entering the bench from the button (mode A). Later modes are reached by tapping.
+static void peripheralsOff(void) {
+  touch.sleep();                      // CST226SE standby (needs a power cycle to return)
+  if (alsOk) {
+    als.disableLightSensor();
+    als.disableProximity();
+  }
+}
+
 static void bench_event_cb(lv_event_t *e) {
+  // Stop charging for the duration of the bench. A "full" battery still does
+  // periodic top-off cycles, and each one adds tens of mA to the meter at a moment
+  // you can't predict — which is why A-B (a fixed backlight difference that should
+  // be identical every run) came out as 18 mA once and 6 mA the next time.
+  // Pinning this makes the differences reproducible. Restored on exit / on reboot.
+  if (pmuOk) PPM.disableCharge();
+
   benchMode      = BENCH_BL_FULL;
   benchEnteredMs = millis();
   lv_label_set_text(benchLabel, benchName(benchMode));
@@ -405,6 +445,12 @@ static void bench_event_cb(lv_event_t *e) {
 // visible button to press, so any touch anywhere advances. Rising-edge only
 // (press, not hold), with a guard so the tap that entered a mode can't skip it.
 static void benchAdvanceOnTouch(void) {
+  // Once the controller is asleep it won't answer: every getPoint() becomes an I2C
+  // NACK/timeout that burns CPU instead of sleeping. That cost 31 mA and made mode E
+  // read HIGHER than mode D — the instrument measuring itself. Modes E/F auto-advance
+  // on a timer instead.
+  if (periphOff) return;
+
   int16_t x[1], y[1];
   bool pressed = touch.getPoint(x, y, 1) > 0;
   if (pressed && !benchTouchPrev && (millis() - benchEnteredMs) > 500) {
@@ -416,7 +462,10 @@ static void benchAdvanceOnTouch(void) {
       lv_obj_invalidate(lv_screen_active());   // SLPIN loses the image; force a full redraw
     }
     lv_label_set_text(benchLabel, benchName(benchMode));
-    if (benchMode == BENCH_OFF) lastActivityMs = millis();  // hand control back awake
+    if (benchMode == BENCH_OFF) {
+      lastActivityMs = millis();          // hand control back awake
+      if (pmuOk) PPM.enableCharge();      // bench over: let the battery charge again
+    }
   }
   benchTouchPrev = pressed;
 }
@@ -443,7 +492,7 @@ static bool benchStep(void) {
       setBacklight(0);           delay(5); break;
     case BENCH_LIGHT_SLEEP:                   // B minus C = what the busy CPU costs
       setBacklight(0);
-      enterLightSleep();                      // note: ignores the !onUsbCached gate
+      enterLightSleep(true);                      // note: ignores the !onUsbCached gate
       break;
     case BENCH_DISP_SLEEP:                    // C minus D = cost of the ST7796 itself
       setBacklight(0);
@@ -451,10 +500,25 @@ static bool benchStep(void) {
         panel->displayOff();                  // ST7796 SLPIN: stop scanning the panel
         dispAsleep = true;
       }
-      enterLightSleep();
+      enterLightSleep(true);
       break;
-    case BENCH_DEEP_SLEEP:                    // D minus E = cost of RAM + peripherals
+    case BENCH_ALL_OFF:                       // D minus E = cost of touch + ALS
       setBacklight(0);
+      if (!dispAsleep) { panel->displayOff(); dispAsleep = true; }
+      if (!periphOff)  { peripheralsOff();    periphOff  = true; }
+      // Touch is asleep now, so a tap can't advance us — auto-advance instead, or
+      // the bench would be stuck here until a manual reset.
+      if ((millis() - benchEnteredMs) > 25000) {
+        benchMode      = BENCH_DEEP_SLEEP;
+        benchEnteredMs = millis() - BENCH_ANNOUNCE_MS;  // skip announce: screen is off
+        break;
+      }
+      enterLightSleep(false);
+      break;
+    case BENCH_DEEP_SLEEP:                    // E minus F = the CPU's last contribution
+      setBacklight(0);                        // ...and F itself = the firmware floor
+      if (!dispAsleep) { panel->displayOff(); dispAsleep = true; }
+      if (!periphOff)  { peripheralsOff();    periphOff  = true; }
       enterDeepSleep(false);                  // timer only; never returns (reboots)
       break;
   }
@@ -660,7 +724,7 @@ void loop() {
   bool screenIdle = !onUsbCached && (millis() - lastActivityMs) > BL_OFF_MS;
   applyScreenPower(screenIdle);
   if (!onUsbCached && screenIdle && lv_anim_count_running() == 0) {
-    enterLightSleep();
+    enterLightSleep(true);
   } else {
     delay(5);
   }

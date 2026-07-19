@@ -6,18 +6,21 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
 > `esp32-board-bringup` skill. Current position: **Stage 5e complete — inline USB
-> power meter. A "Bench" button walks five held power states (A poll+BL100 / B
-> poll+BLoff / C light sleep / D +display off / E deep sleep timer-only) so a slow
-> meter can settle. Real numbers at last: 129 / 111 / 80 / 71 / 78 mA, RESET floor
-> 66 mA. Findings: the backlight is NOT dominant (18 mA) — a busy CPU costs 31 mA;
-> deep sleep saves only 2 mA over light sleep and is 12 mA WORSE than holding RESET
-> (the price of wake-on-touch); and ~69 mA (53%) is not reachable from firmware and
-> remains UNEXPLAINED. Shipped win: ST7796 SLPIN via panel->displayOff() in the idle
-> path (9 mA) — we'd only ever turned off the backlight. Lesson 05e written.
-> OPEN BUGS: (1) deep-sleep touch wake fires instantly (`woke: touch`) — three
-> hypotheses tried and all failed; next step is to BISECT, not guess. (2) the
-> unexplained 69 mA. Next up (pick by interest): those two, or buttons / SD card /
-> LVGL flex-grid refactor.**
+> power meter. A "Bench" button walks six held power states (A poll+BL100 / B
+> poll+BLoff / C light sleep / D +display off / E +touch/ALS off / F deep sleep
+> timer-only) so a slow meter can settle. **Measure on a DUMB CHARGER with
+> `PPM.disableCharge()`** — four measurement artifacts had to be removed before the
+> numbers held: battery charge current (~35 mA), the USB HOST LINK (~26-35 mA, alive
+> even through deep sleep, and LARGER than the backlight), the bench's own I2C
+> polling of a sleeping touch controller (31 mA), and a defeated sleep. Final:
+> 94-120 / 74 / 41 / 30 / 29 / 27 mA. Busy CPU 33 mA is the biggest firmware lever,
+> backlight ~18-20, ST7796 11, floor 27 mA, ~71% firmware-reachable. Shipped:
+> ST7796 SLPIN in the idle path + clean wake/boot (no more white noise). The
+> deep-sleep touch-wake bug is SOLVED: the CST226SE holds IRQ LOW until someone
+> reads it, so the line latches low the moment we stop polling to sleep — found via
+> a power reading that contradicted the model, not by theorising. Lesson 05e
+> written. NEXT: button wake (GPIO 0/12/16) — a clean line with nothing holding
+> it.**
 
 ---
 
@@ -274,27 +277,34 @@ deep sleep (reboot, ~µA).
 ## ✅ Stage 5e — Inline USB power meter   [DONE]
 
 A "Bench" button holds one power state still (announce 4 s at full brightness, then
-settle; any touch advances) so a slow USB meter can settle on it.
+settle; any touch advances) so a slow USB meter can settle on it. **Measured on a
+dumb charger with `PPM.disableCharge()` for the run** — see the artifacts below.
 
 | State | Meter | Δ = cost of… |
 |---|---|---|
-| A: poll + BL 100% | 129 mA | |
-| B: poll + BL off | 111 mA | backlight **18 mA** (14%) |
-| C: light sleep | 80 mA | busy CPU **31 mA** (24%) |
-| D: + display off (SLPIN) | 71 mA | ST7796 scanning **9 mA** (7%) |
-| E: deep sleep (timer only) | 78 mA | rest of chip ≈ **2 mA** (display still awake) |
-| RESET held | 66 mA | ESP32 running at all ≈ 12 mA |
-| unexplained floor | ~69 mA | **53% — not reachable from firmware** |
+| A: poll + BL 100% | 94–120 mA ⚠ not reproducible | |
+| B: poll + BL off | 74 mA | backlight ≈ 18–20 mA ⚠ |
+| C: light sleep | 41 mA | **busy CPU 33 mA** |
+| D: + display off (SLPIN) | 30 mA | **ST7796 11 mA** |
+| E: + touch/ALS off | 29 mA | touch + ALS ≈ 1 mA |
+| **F: deep sleep, all off** | **27 mA** | rest of chip ≈ 2 mA |
 
-**What this overturned:** the backlight is *not* dominant (a busy CPU costs ~2×);
-deep sleep buys 2 mA over light sleep and is 12 mA *worse* than holding RESET (the
-price of keeping `ESP_PD_DOMAIN_RTC_PERIPH` powered for wake-on-touch); and Stages
-5b–5d optimised ~47% of the problem — **loops/sec cannot see a load that isn't the CPU.**
+**≈71% of the draw is firmware-reachable; the floor is 27 mA** (regulator quiescent,
+status LED, panel bias, sleeping I²C parts). No schematic hunt needed.
 
-**Shipped:** `applyScreenPower()` now sends ST7796 `SLPIN` (`panel->displayOff()`)
-alongside the backlight in the idle path — 9 mA we'd been leaving on the table since
-05c. Order matters: dark before SLPIN; `lv_obj_invalidate` + `lv_refr_now` before
-lighting back up (SLPIN discards the frame buffer).
+**FOUR measurement artifacts, all of them the apparatus not the board.** The first
+run concluded "backlight isn't dominant, deep sleep saves 2 mA, 53% unreachable" —
+all artifact. (1) **Battery charge current** ~35 mA, variable; the meter is upstream
+of the PMU and even a full battery top-off cycles. Detected because `A − B` (a fixed
+difference between two pinned duties) read 18, then 6, then 20. Fixed with
+`disableCharge()`. (2) **USB host link** ~26–35 mA — the S3's PHY + enumerated link
+stay alive *through deep sleep*, and it looked exactly like a hardware floor.
+**Larger than the backlight.** Fixed by using a dumb charger. (3) **The
+instrument's own I²C polling**, 31 mA (mode E). (4) **A defeated sleep** (also E).
+⚠ High-current rows still don't reproduce (A: 94 then 120 on identical settings) —
+likely SY6970 **power-path supplement mode**: the meter reads *input* current, which
+equals the load only while the battery is neither supplementing nor absorbing.
+Below ~40 mA everything reproduced exactly. Trust the sleep states, not A.
 
 **One confusion, three bugs.** We'd conflated "the backlight" (a PWM pin) with "the
 display" (a separate chip with its own power state and memory) since Stage 1. That
