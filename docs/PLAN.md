@@ -5,22 +5,21 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 5f complete — BUTTON WAKE.
-> The deep-sleep touch wake never worked and never could: the CST226SE holds IRQ LOW
-> until the pending report is read, so the line latches low the moment firmware stops
-> polling in order to sleep. Replaced with the physical button on **GPIO 16**, which
-> we PROBED first: idles high, active-low, **EXTERNAL pull-up** (tested by driving an
-> internal PULLDOWN and seeing who won). External pull-up = we could drop
-> `rtc_gpio_init/pullup_en/hold_en` AND `esp_sleep_pd_config(RTC_PERIPH, ON)`. Worked
-> FIRST TRY (`woke: button`). Board correction: only TWO buttons exist (GPIO 0=BOOT,
-> 16=user); GPIO 12 has a pull-up but nothing attached. The button also now advances
-> the power bench in every mode (E and F are both dark — you couldn't tell them
-> apart on a timer). Final bench (charger, charging disabled): 97.5 / 71 / 38.5 /
-> 28.3 / 27.5 / 25 mA — four differences reproduced within 0.8 mA of the prior run.
-> **Resolution limit reached:** every mode also drifted ~2 mA between runs, so the
-> RTC_PERIPH saving is real in principle and unmeasurable in practice. Lessons 05e +
-> 05f written. NEXT: SD card (SPI CS 14), a button-driven UI, or an LVGL flex/grid
-> refactor.**
+> `esp32-board-bringup` skill. Current position: **Stage 6 complete — microSD.
+> The card SHARES the display's SPI bus (SCLK 18 / MOSI 17 / MISO 8; CS 39 display,
+> CS 14 SD). Sharing works because Arduino_ESP32SPI is built `is_shared_interface=
+> true` (brackets every transfer with spiTransaction/spiEndTransaction) and both must
+> sit on the SAME host — `SPIClass sdSPI(FSPI)`, since on the S3 the core numbers
+> FSPI=0=SPI2. **Init order matters even though run-time sharing is fine:**
+> initialising SPIClass before `panel->begin()` left the screen BLACK. Card mounts at
+> **20 MHz** (`SDHC 61120MB@20000k`); read/write self-test + an appending
+> `/boots.csv` boot log both verified (L climbs on every reset). **Debugging lesson:
+> the `SD.cardType()` failure diagnostic was MEANINGLESS — it reads the mounted-card
+> struct, so it returns CARD_NONE for ANY begin() failure; it was used to rule out
+> formatting, and reformatting FAT32 was the actual fix (>32GB cards ship exFAT).
+> Also fixed a speed ladder that ran slow->fast and so found the SLOWEST working
+> clock (400 kHz vs 20 MHz = 50x).** Lesson 06 written. NEXT: log the battery gauge
+> to CSV, a button-driven UI, or the LVGL flex/grid refactor.**
 
 ---
 
@@ -368,7 +367,53 @@ Lesson `docs/lesson-05f-button-wake.md` + snapshot `docs/lesson-05f-button-wake/
 
 ---
 
+## ✅ Stage 6 — microSD on the shared SPI bus   [DONE]
+
+**The bus.** SD (CS 14) shares SCLK/MOSI/MISO with the display (CS 39). Verified
+*from the driver source* before writing code: `Arduino_ESP32SPI` defaults to
+`is_shared_interface=true`, calling `spiTransaction()` in `beginWrite()` and
+`spiEndTransaction()` in `endWrite()` — so it re-establishes its clock/mode per
+transfer and releases the bus. Both devices must be on the **same SPI host**:
+`SPIClass sdSPI(FSPI)` (S3: FSPI=0=SPI2, which is what Arduino_GFX picks).
+
+**Init order is a separate problem from run-time sharing.** Bringing the SD up
+before `panel->begin()` left the **screen black** — the display can't initialise a
+bus another driver already owns. Display first, then `initSD()`. A probe that must
+run early can borrow and return the bus (`SD.end(); sdSPI.end();`).
+
+**Mount:** speed ladder 20M → 400k, **fastest first**. Original version ran
+slow→fast and stopped at the first success — which finds the *slowest* working
+clock (reported 400 kHz ≈ 50 KB/s when the card does 20 MHz ≈ 2.5 MB/s).
+Result `SDHC 61120MB@20000k`.
+
+**Filesystem:** write→read-back self-test, plus `/boots.csv` appended once per boot
+with the line count read back (`rw L3`, climbs on every reset). `FILE_APPEND` not
+`FILE_WRITE` (which truncates); `File` has a bool conversion; `close()` is manual —
+buffered data is lost without it. Three storage tiers now: RAM → `RTC_DATA_ATTR`
+(survives deep sleep) → SD (survives power loss *and* reflashing).
+
+**🐛 The debugging failure worth remembering.** The card wouldn't mount and the
+diagnostic printed `SD.cardType()` to separate "no comms" (electrical) from
+"filesystem unreadable" (formatting). It reported `t=0` = CARD_NONE, so formatting
+was ruled out and four electrical hypotheses were chased. **`cardType()` reads the
+MOUNTED card struct — it returns 0 for ANY `begin()` failure.** The field could
+never distinguish the two cases. Reformatting FAT32 fixed it instantly (>32 GB cards
+ship **exFAT**; the ESP32 `SD` library mounts only FAT16/32). *A diagnostic is worth
+exactly what its derivation is worth — reading the driver source made the bus work
+first time; assuming a return value's meaning cost four wrong turns.* Third
+instrument in two stages to measure the wrong thing.
+
+**Board notes:** LilyGO ship **no SD example** (16 examples, none for SD), and their
+`utilities.h` lists **GPIO 16 as both a user button and `VIBRATING_MOTOR`** — we only
+ever *read* it; driving it as an output would buzz a motor.
+
+Lesson `docs/lesson-06-sdcard.md` + snapshot `docs/lesson-06-sdcard/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
+- **Log the battery gauge to CSV** — the card is a logging destination and the gauge
+  is already sampling once a second. Natural next build.
 - **🐛 OPEN: deep-sleep touch wake fires instantly** (`woke: touch`). Three
   hypotheses tried, all failed — heartbeat (line measured perfectly quiet, 500 ms =
   the function's minimum), missing `rtc_gpio_init()`, and `RTC_PERIPH` powered down
