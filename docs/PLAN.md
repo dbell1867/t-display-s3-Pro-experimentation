@@ -5,22 +5,22 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 5e complete — inline USB
-> power meter. A "Bench" button walks six held power states (A poll+BL100 / B
-> poll+BLoff / C light sleep / D +display off / E +touch/ALS off / F deep sleep
-> timer-only) so a slow meter can settle. **Measure on a DUMB CHARGER with
-> `PPM.disableCharge()`** — four measurement artifacts had to be removed before the
-> numbers held: battery charge current (~35 mA), the USB HOST LINK (~26-35 mA, alive
-> even through deep sleep, and LARGER than the backlight), the bench's own I2C
-> polling of a sleeping touch controller (31 mA), and a defeated sleep. Final:
-> 94-120 / 74 / 41 / 30 / 29 / 27 mA. Busy CPU 33 mA is the biggest firmware lever,
-> backlight ~18-20, ST7796 11, floor 27 mA, ~71% firmware-reachable. Shipped:
-> ST7796 SLPIN in the idle path + clean wake/boot (no more white noise). The
-> deep-sleep touch-wake bug is SOLVED: the CST226SE holds IRQ LOW until someone
-> reads it, so the line latches low the moment we stop polling to sleep — found via
-> a power reading that contradicted the model, not by theorising. Lesson 05e
-> written. NEXT: button wake (GPIO 0/12/16) — a clean line with nothing holding
-> it.**
+> `esp32-board-bringup` skill. Current position: **Stage 5f complete — BUTTON WAKE.
+> The deep-sleep touch wake never worked and never could: the CST226SE holds IRQ LOW
+> until the pending report is read, so the line latches low the moment firmware stops
+> polling in order to sleep. Replaced with the physical button on **GPIO 16**, which
+> we PROBED first: idles high, active-low, **EXTERNAL pull-up** (tested by driving an
+> internal PULLDOWN and seeing who won). External pull-up = we could drop
+> `rtc_gpio_init/pullup_en/hold_en` AND `esp_sleep_pd_config(RTC_PERIPH, ON)`. Worked
+> FIRST TRY (`woke: button`). Board correction: only TWO buttons exist (GPIO 0=BOOT,
+> 16=user); GPIO 12 has a pull-up but nothing attached. The button also now advances
+> the power bench in every mode (E and F are both dark — you couldn't tell them
+> apart on a timer). Final bench (charger, charging disabled): 97.5 / 71 / 38.5 /
+> 28.3 / 27.5 / 25 mA — four differences reproduced within 0.8 mA of the prior run.
+> **Resolution limit reached:** every mode also drifted ~2 mA between runs, so the
+> RTC_PERIPH saving is real in principle and unmeasurable in practice. Lessons 05e +
+> 05f written. NEXT: SD card (SPI CS 14), a button-driven UI, or an LVGL flex/grid
+> refactor.**
 
 ---
 
@@ -327,6 +327,44 @@ ESP32 but leaves every other chip in whatever state firmware left it — the ST7
 was still scanning. Mode D (CPU alive, display asleep) nearly matches it.
 
 Lesson `docs/lesson-05e-power-meter.md` + snapshot `docs/lesson-05e-power-meter/main.cpp`.
+
+---
+
+## ✅ Stage 5f — Button wake   [DONE]
+
+**Why:** 05e proved the touch line can never work as a deep-sleep wake — the
+CST226SE **holds IRQ LOW until someone reads it**, so it latches low the instant we
+stop polling to sleep. A touch controller asserts precisely when nobody is listening.
+
+**Probed before designing** (scaffolding since removed): all pins idle HIGH,
+active-low, and all have **EXTERNAL pull-ups** — tested by driving an internal
+`INPUT_PULLDOWN` and seeing the pin stay HIGH. **Board correction: only TWO buttons
+exist** (GPIO 0 = BOOT, GPIO 16 = user); GPIO 12 has a pull-up but nothing attached,
+despite vendor docs listing three.
+
+**Wired GPIO 16 to EXT1** (`ESP_EXT1_WAKEUP_ANY_LOW`) + a release-wait before
+arming. Worked **first try** (`Boot #12 woke: button`) after four failures on the
+touch line. The external pull-up let us **delete** `rtc_gpio_init`,
+`rtc_gpio_pullup_en`, `rtc_gpio_hold_en` and `esp_sleep_pd_config(RTC_PERIPH, ON)` —
+internal pull-ups live in a domain deep sleep powers down; a resistor doesn't.
+
+**Bonus:** the button now advances the power bench in **every** mode, replacing a
+silent timer — E and F are both dark, so you couldn't tell which one the meter was
+showing. A physical input that survives everything the firmware turns off is exactly
+what a bench needs.
+
+**A probe that measured the wrong thing:** it reported zero bounce, because the edge
+was detected in `loop()` (~5 ms) and the 50 ms sampling window started only after
+that — bounce (1–5 ms) was already over. Left unfixed deliberately: **bounce is
+harmless for a wake source**, it only matters when counting presses.
+
+**Final bench** (charger, charging disabled): 97.5 / 71 / 38.5 / 28.3 / 27.5 / 25 mA.
+Differences reproduced within 0.8 mA of the previous session — but every mode also
+drifted ~2 mA, so **the RTC_PERIPH saving is unmeasurable here. Resolution limit
+reached:** ≥10 mA solid, ~2 mA is drift. `A − B` has read 18/6/20/26.5 across four
+runs — the backlight is "≈20 mA, ± quite a lot" and that's as good as this gets.
+
+Lesson `docs/lesson-05f-button-wake.md` + snapshot `docs/lesson-05f-button-wake/main.cpp`.
 
 ---
 
