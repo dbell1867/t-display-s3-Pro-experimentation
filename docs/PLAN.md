@@ -5,19 +5,18 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 9 complete — capture a
-> still to SD.** In the viewfinder, short-tap GPIO 16 saves the frame as
-> `/IMG_NNNN.JPG` (green filename under the image), long-hold exits. Pipeline
-> `esp_camera_fb_get()` → `frame2jpg(fb,80,&jpg,&len)` (bundled `img_converters.h`,
-> we `free(jpg)`) → `SD.open(next-free-name, FILE_WRITE); f.write`. **No bus fight —
-> DVP (camera) / CPU (encode) / SPI (SD write, bracketed w/ display, Stage 6);** SCCB
-> untouched during capture. Next filename comes from the card (`SD.exists` loop). One
-> button, two jobs by duration (tap<700ms=capture on release, hold≥700ms=exit).
-> Stills are viewfinder-res (QCIF). Stages 1–9 complete: display, touch, LVGL,
-> battery/PMU, power ladder (light→deep sleep, button wake), auto-brightness, SD,
-> camera detect→viewfinder→capture. Lesson 09 written. **NEXT: higher-res stills
-> (sensor reconfigure), scale/rotate the viewfinder to fill the screen, or the last
-> untouched subsystem — WiFi/BLE (e.g. serve the JPEGs over HTTP).**
+> `esp32-board-bringup` skill. Current position: **Stage 10 complete — WiFi first
+> light (scan).** Press GPIO 12 → full-screen list of nearby networks (SSID/RSSI/
+> lock), tap to exit; 5 found, sensible RSSI. Radio+antenna proven, scan only.
+> `#include <WiFi.h>` (bundled, no lib_deps) cost flash 26%→44%. Pattern:
+> `WiFi.mode(WIFI_STA); WiFi.disconnect(); WiFi.scanNetworks()` (blocks ~2-4s), read
+> `SSID/RSSI(dBm, →0=stronger)/encryptionType`, then `WiFi.mode(WIFI_OFF)` (idle
+> radio ~tens of mA — protects the Stage 5 power work). Triggered by the re-found
+> GPIO 12 button. **The radio needs NO bus-sharing dance** (on-die, own antenna) —
+> only power/RAM. Stages 1–10 complete: display, touch, LVGL, battery/PMU, power
+> ladder, auto-brightness, SD, camera detect→viewfinder→capture, WiFi scan. Lesson 10
+> written. **NEXT: Stage 11 CONNECT (`WiFi.begin`, needs Derek's credentials +
+> STA-vs-AP decision), then Stage 12 HTTP server for the SD JPEGs (the capstone).**
 
 ---
 
@@ -538,12 +537,41 @@ Lesson `docs/lesson-09-capture-sd.md` + snapshot `docs/lesson-09-capture-sd/main
 
 ---
 
+## ✅ Stage 10 — WiFi first light (scan)   [DONE]
+
+**Result:** press the **GPIO 12 button** → a full-screen list of nearby WiFi
+networks (SSID, RSSI, lock), tap to exit. Confirmed: 5 networks found, sensible RSSI
+(-40 near … -76 far). Radio + antenna proven. Scan only — no connection yet.
+
+**The radio needs NO bus-sharing dance** (unlike camera=I²C, SD=SPI): it's on-die
+with its own antenna, touches none of our pins — no recovery helper, no init-order
+trap. The one cost is **weight**: `#include <WiFi.h>` took flash **26%→44%** (~600 KB
+TCP/IP + supplicant) and RAM 33%→42%.
+
+**Scan = the radio's "hello world"** — no credentials, no STA/AP decision (those come
+at connect time). `WiFi.mode(WIFI_STA); WiFi.disconnect(); n = WiFi.scanNetworks()`
+(BLOCKS ~2-4 s); per network `WiFi.SSID(i)` / `RSSI(i)` (dBm, closer to 0 = stronger)
+/ `encryptionType(i)`. **Radio OFF after** (`WiFi.scanDelete(); WiFi.mode(WIFI_OFF)`)
+— an idle radio draws tens of mA and would undo the Stage 5 power work. Triggered by
+the **GPIO 12 button just re-found in the rocker correction** — earning its first job.
+
+**Debugging aside:** the scan build's first boot also showed SD `f_mount failed: (3)`
+×5. Ruled out the new code by **timing** (SD mounts in setup, before any WiFi runs)
+and by **error KIND** (`FR_NOT_READY` = block-level comms, not a format error) →
+physical: the card had been pulled to view JPEGs and wasn't reseated. Reseat → clean
+boot. (Contrast Stage 6's meaningless `SD.cardType()`; this error was specific.)
+
+Lesson `docs/lesson-10-wifi-scan.md` + snapshot `docs/lesson-10-wifi-scan/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
-- **📷 Higher-resolution stills** — reconfigure the sensor to a bigger frame for the
-  capture, then back to QCIF for preview. Or **scale/rotate the live viewfinder** to
-  fill the portrait screen (measure fps first — non-DMA SPI ceiling, Stage 3b).
-- **📡 WiFi / BLE — the last untouched subsystem** (e.g. serve the captured JPEGs
-  over HTTP). The radio is a whole domain of its own.
+- **📡 Stage 11 — CONNECT to WiFi:** `WiFi.begin(ssid,pass)` → wait `WL_CONNECTED` →
+  show the IP. **Needs Derek's credentials + the STA-vs-AP decision** (join home
+  network vs board-as-hotspot). Then **Stage 12 — HTTP server** serving the SD card's
+  JPEGs to a phone (ties camera+SD+radio together — the capstone).
+- Smaller camera refinements still open: higher-res stills (sensor reconfigure),
+  scale/rotate the viewfinder to fill the screen.
 - **Log the battery gauge to CSV** — the card is a logging destination and the gauge
   is already sampling once a second. Natural next build.
 - **🐛 OPEN: deep-sleep touch wake fires instantly** (`woke: touch`). Three
