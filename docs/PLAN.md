@@ -335,9 +335,12 @@ stop polling to sleep. A touch controller asserts precisely when nobody is liste
 
 **Probed before designing** (scaffolding since removed): all pins idle HIGH,
 active-low, and all have **EXTERNAL pull-ups** — tested by driving an internal
-`INPUT_PULLDOWN` and seeing the pin stay HIGH. **Board correction: only TWO buttons
-exist** (GPIO 0 = BOOT, GPIO 16 = user); GPIO 12 has a pull-up but nothing attached,
-despite vendor docs listing three.
+`INPUT_PULLDOWN` and seeing the pin stay HIGH. ~~Board correction: only TWO buttons
+exist; GPIO 12 has a pull-up but nothing attached.~~ **↳ CORRECTED 2026-07-21: the
+two controls are ROCKERS (4 switches). Rocker 1 = BOOT (GPIO 0) + RESET (EN pin);
+Rocker 2 = GPIO 12 + GPIO 16. ALL of GPIO 0/12/16 are real buttons, external
+pull-up, RTC-capable — the first probe only pressed one side of each rocker so GPIO
+12 looked dead. GPIO 12 is a usable free input.**
 
 **Wired GPIO 16 to EXT1** (`ESP_EXT1_WAKEUP_ANY_LOW`) + a release-wait before
 arming. Worked **first try** (`Boot #12 woke: button`) after four failures on the
@@ -556,7 +559,9 @@ Lesson `docs/lesson-09-capture-sd.md` + snapshot `docs/lesson-09-capture-sd/main
 - **Flash hazard worth fixing:** a sleeping CPU doesn't service USB CDC, so upload
   fails with `OSError: [Errno 71] Protocol error` (recover: RESET, or BOOT+RESET).
   A short "flash window" at the top of `setup()` before any sleeping would prevent it.
-- Other onboard peripherals: physical buttons (GPIO 0/12/16), SD card (SPI CS 14).
+- Other onboard peripherals: physical buttons — **2 rockers / 4 switches: BOOT(0)+
+  RESET(EN) and GPIO 12 + GPIO 16, all three GPIOs real & usable** (re-probed
+  2026-07-21) — SD card (SPI CS 14).
 - Circle back to UI: a richer LVGL screen / multiple screens. The gauge screen now
   hand-aligns ~9 widgets by absolute y-offset and has already produced one
   invisible-overlap bug — a good argument for LVGL flex/grid containers.

@@ -47,7 +47,8 @@ We had been burned enough to measure first. Temporary scaffolding read all three
 documented button pins and displayed, live on screen:
 
 - **idle level** — all three read HIGH, so they're active-low.
-- **press counts** — GPIO 0 and 16 counted; **GPIO 12 never did**.
+- **press counts** — GPIO 0 and 16 counted; **GPIO 12 never did** *(this was a
+  measurement error — see the correction below)*.
 - **external pull-up?** — the interesting test:
 
 ```cpp
@@ -65,6 +66,18 @@ Two findings, one of which corrected our board notes:
 1. **The board has only TWO buttons** (GPIO 0 = BOOT, GPIO 16 = user), not the three
    the vendor docs imply. GPIO 12 has a pull-up but nothing attached. *The reference
    was wrong; the measurement was right.*
+
+> **⚠ CORRECTION (2026-07-21): finding #1 was itself wrong — our measurement was
+> incomplete.** The two physical controls are **ROCKERS**, each a *two-way* switch,
+> so there are **four switches, not two**. Rocker 1 = BOOT (GPIO 0) + RESET (the EN
+> pin). Rocker 2 = **GPIO 12 + GPIO 16**. GPIO 12 *is* a real button — the first
+> probe only ever pressed **one side of each rocker**, so 12 (the other half of the
+> 16 rocker) was never actuated and looked dead. A re-probe pressing **both
+> directions** showed all three GPIOs increment, all externally pulled up, all
+> RTC-capable. **The deeper lesson compounds Module 2's own point: "probe before you
+> design" is not enough — you must exercise the control every way it can move. A
+> rocker is not a button, and a probe that only pushes one way measures half of it.**
+> The vendor doc's "three buttons" was closer to right than our correction of it.
 2. **The external pull-up is the prize.** Internal pull-ups live in `RTC_PERIPH` — a
    power domain deep sleep switches **off**. Relying on one forces
    `esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON)`, burning current
