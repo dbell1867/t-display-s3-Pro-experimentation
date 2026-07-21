@@ -5,20 +5,21 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 7 complete — camera shield.
-> Detected an OV5640 (PID 0x5640) with `esp_camera_init()` (bundled with the S3 core,
-> no lib_deps; SCCB on the shared I²C pins 5/6, ledc_timer 1/channel 2 to dodge the
-> backlight, QVGA/1-fb in PSRAM). Detection only — no capture yet. THREE hand-rolled
-> probes each measured the wrong thing: an `ledcAttach(pin,20MHz,2)` that silently
-> FAILED (div_param=0, LEDC is PWM not a clock) so the clock never ran, compounded by
-> SCCB not ACKing like I²C — removed as dead code. The probe also FROZE the gauge:
-> esp_camera's SCCB (I²C port 1) leaves pins 5/6 muxed off Wire (port 0) on deinit,
-> and Wire.begin() is idempotent — fix is `Wire.end(); Wire.begin(); initSharedBus
-> Sensors()`. Serial was invisible until a `while(!Serial && <1500ms)` wait let the
-> native-USB monitor catch setup()'s one-shot log. Benign remaining `[E]` noise:
-> Wire "already initialized" + SPI MISO pin 8 (both from shared buses). Lesson 07
-> written.** NEXT: **live viewfinder (capture → PSRAM → ST7796)**, or the deferred
-> threads (log the gauge to CSV, button-driven UI, LVGL flex/grid).
+> `esp32-board-bringup` skill. Current position: **Stage 8 complete — live
+> viewfinder.** Tap on-screen "Cam" → live OV5640 image on the ST7796, press the
+> physical GPIO 16 button to exit. Pipeline: `esp_camera_fb_get()` →
+> `panel->draw16bitBeRGBBitmap()` → `esp_camera_fb_return()`, QCIF 176×144 RGB565
+> centred (fits the 222-wide panel with no scaling/cropping/rotation), fb_count 2 +
+> GRAB_LATEST in PSRAM. **Two eye-only fixes:** byte order (esp_camera RGB565 is
+> big-endian → the "Be" push, not the native one) and orientation (inverted → fixed
+> in the SENSOR with `set_vflip(s,1)`, free during readout, not a buffer flip).
+> **The camera owns the shared I²C bus while streaming, so touch/gauge freeze** —
+> enter via touch button, EXIT via the physical GPIO 16 button (the Stage 5f
+> primitive). Factored Stage 7 into `cameraFillPins()` + `cameraRecoverBus()` reused
+> by probe and viewfinder. Third bottom-row button now (68 px each) — argues for LVGL
+> flex/grid. Lesson 08 written. **NEXT: scale/rotate the viewfinder to fill the
+> portrait screen (measure fps first — non-DMA SPI ceiling), capture-to-SD a still,
+> or the deferred threads (log the gauge to CSV, LVGL flex/grid refactor).**
 
 ---
 
@@ -458,10 +459,53 @@ Lesson `docs/lesson-07-camera.md` + snapshot `docs/lesson-07-camera/main.cpp`.
 
 ---
 
+## ✅ Stage 8 — Live viewfinder   [DONE]
+
+**Result:** tap the on-screen **"Cam"** button → a **live camera image** on the
+ST7796; press the **physical GPIO 16 button** to exit back to the gauge. Correct
+colours, right-side up (confirmed by eye). First light for the camera *pipeline*.
+
+**The pipeline** (blocking loop, takes over the screen): `esp_camera_fb_get()` →
+`panel->draw16bitBeRGBBitmap(ox, oy, fb->buf, fb->width, fb->height)` →
+`esp_camera_fb_return(fb)` (recycle or the queue starves). Streaming config vs
+Stage 7's detection: `fb_count=2`, `grab_mode=CAMERA_GRAB_LATEST`,
+`frame_size=FRAMESIZE_QCIF`.
+
+**Frame size = QCIF 176×144.** The panel is 222 wide; QCIF is the largest standard
+size that **fits with no scaling, cropping or rotation** — centred at ox=23, oy=168.
+First-light discipline: smallest correct thing on the glass, refine later.
+
+**The two things always wrong first (both eye-only diagnosable):** (1) **byte
+order** — esp_camera RGB565 is **big-endian** vs the panel; fix is choosing the
+matching push `draw16bitBeRGBBitmap` (not `draw16bitRGBBitmap`), not a swap loop.
+(2) **orientation** — image came up inverted; fixed in the **sensor** via
+`esp_camera_sensor_get()->set_vflip(s,1)` (free, done during readout — not a
+software buffer flip). `set_hmirror` is the other half if a module is mounted a
+full 180°.
+
+**A greedy peripheral dictates the controls.** SCCB is on the shared I²C pins 5/6,
+so touch + the gauge are **frozen while streaming** — not a bug, a constraint.
+**Enter via the touch "Cam" button, EXIT via the physical GPIO 16 button** (the
+Stage 5f primitive that survives everything the firmware takes over, earning its
+keep again). The loop blocks the main loop; fine, because `esp_camera_fb_get()`
+blocks on a semaphore that yields to the RTOS (nothing starves, no watchdog).
+
+**Reuse:** factored Stage 7's config into `cameraFillPins(cfg)` (pin map + XCLK +
+LEDC-away-from-backlight) and its recovery into `cameraRecoverBus()`
+(`Wire.end(); Wire.begin(); ` + re-init touch/PMU/ALS) so probe and viewfinder can't
+drift. On exit, repaint the clobbered LVGL screen (`fillScreen` → `lv_obj_invalidate`
+→ `lv_refr_now`) — never illuminate a buffer you haven't drawn (Stage 5e). A **third
+button** now shares the bottom row (68 px each) — the pressure that argues for LVGL
+flex/grid.
+
+Lesson `docs/lesson-08-viewfinder.md` + snapshot `docs/lesson-08-viewfinder/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
-- **📷 Live viewfinder (Stage 8)** — capture a frame into PSRAM and push it to the
-  ST7796. The camera + display in one pipeline; first heavy PSRAM use. The obvious
-  follow-on now that detection works.
+- **📷 Scale/rotate the viewfinder to fill** the portrait screen — measure the fps
+  cost first (QCIF over non-DMA SPI, the Stage 3b ceiling). Or **capture-to-SD** a
+  still (ties in Stage 6: save a JPEG frame to the card).
 - **Log the battery gauge to CSV** — the card is a logging destination and the gauge
   is already sampling once a second. Natural next build.
 - **🐛 OPEN: deep-sleep touch wake fires instantly** (`woke: touch`). Three
