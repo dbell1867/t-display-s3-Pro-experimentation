@@ -5,21 +5,20 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 6 complete — microSD.
-> The card SHARES the display's SPI bus (SCLK 18 / MOSI 17 / MISO 8; CS 39 display,
-> CS 14 SD). Sharing works because Arduino_ESP32SPI is built `is_shared_interface=
-> true` (brackets every transfer with spiTransaction/spiEndTransaction) and both must
-> sit on the SAME host — `SPIClass sdSPI(FSPI)`, since on the S3 the core numbers
-> FSPI=0=SPI2. **Init order matters even though run-time sharing is fine:**
-> initialising SPIClass before `panel->begin()` left the screen BLACK. Card mounts at
-> **20 MHz** (`SDHC 61120MB@20000k`); read/write self-test + an appending
-> `/boots.csv` boot log both verified (L climbs on every reset). **Debugging lesson:
-> the `SD.cardType()` failure diagnostic was MEANINGLESS — it reads the mounted-card
-> struct, so it returns CARD_NONE for ANY begin() failure; it was used to rule out
-> formatting, and reformatting FAT32 was the actual fix (>32GB cards ship exFAT).
-> Also fixed a speed ladder that ran slow->fast and so found the SLOWEST working
-> clock (400 kHz vs 20 MHz = 50x).** Lesson 06 written. NEXT: log the battery gauge
-> to CSV, a button-driven UI, or the LVGL flex/grid refactor.**
+> `esp32-board-bringup` skill. Current position: **Stage 7 complete — camera shield.
+> Detected an OV5640 (PID 0x5640) with `esp_camera_init()` (bundled with the S3 core,
+> no lib_deps; SCCB on the shared I²C pins 5/6, ledc_timer 1/channel 2 to dodge the
+> backlight, QVGA/1-fb in PSRAM). Detection only — no capture yet. THREE hand-rolled
+> probes each measured the wrong thing: an `ledcAttach(pin,20MHz,2)` that silently
+> FAILED (div_param=0, LEDC is PWM not a clock) so the clock never ran, compounded by
+> SCCB not ACKing like I²C — removed as dead code. The probe also FROZE the gauge:
+> esp_camera's SCCB (I²C port 1) leaves pins 5/6 muxed off Wire (port 0) on deinit,
+> and Wire.begin() is idempotent — fix is `Wire.end(); Wire.begin(); initSharedBus
+> Sensors()`. Serial was invisible until a `while(!Serial && <1500ms)` wait let the
+> native-USB monitor catch setup()'s one-shot log. Benign remaining `[E]` noise:
+> Wire "already initialized" + SPI MISO pin 8 (both from shared buses). Lesson 07
+> written.** NEXT: **live viewfinder (capture → PSRAM → ST7796)**, or the deferred
+> threads (log the gauge to CSV, button-driven UI, LVGL flex/grid).
 
 ---
 
@@ -411,7 +410,58 @@ Lesson `docs/lesson-06-sdcard.md` + snapshot `docs/lesson-06-sdcard/main.cpp`.
 
 ---
 
+## ✅ Stage 7 — Camera shield: detect the sensor   [DONE]
+
+**Result:** `CAMERA OK: sensor PID 0x5640` — an **OV5640** (5 MP), on a
+ribbon-cable module (shielded, no readable markings). Detection only; no capture yet.
+
+**The instrument.** `esp_camera_init()` (from `esp_camera.h`, **bundled with the S3
+core — no `lib_deps`**) powers the sensor, clocks XCLK through the proper peripheral,
+talks real SCCB, detects by PID, and returns a specific `esp_err_t`. Config: pins
+from `CameraShield/utilities.h` (PWDN 46, XCLK 11, PCLK 2, VSYNC 7, HREF 15, D0-D7 =
+45/41/40/42/1/3/10/4, SIOD/SIOC = the I²C pins 5/6); `ledc_timer=1`/`channel=2` to
+dodge the backlight's LEDC; `FRAMESIZE_QVGA`, `fb_count=1`, `CAMERA_FB_IN_PSRAM`
+(first real PSRAM use). PID `0x5640` = OV5640 — **the vendor example implies OV2640;
+pin map matched, sensor didn't.**
+
+**🐛 Four probes; the three hand-rolled ones each measured the wrong thing.** An
+I²C scan that toggled PWDN and generated XCLK with `ledcAttach(pin, 20MHz, 2)`. It
+printed "no camera" four rounds running while being **physically incapable of ever
+printing anything else**, for two independent reasons: (1) `ledcAttach` **failed** —
+20 MHz needs an LEDC divider of ~0 (`div_param=0`, past the peripheral's limit) and
+its return was never checked, so the clock never ran; LEDC is a PWM generator, not a
+clock source. (2) Even clocked, **SCCB doesn't ACK like I²C**, so `Wire` reads it as
+absent. We refined the broken instrument (PWDN polarity sweep, longer settle) before
+reaching for the driver. **Removed the hand-rolled probe** (post-mortem kept in a
+code comment): a diagnostic that always lies is worse than none.
+
+**🐛 The probe broke the bus it borrowed (mirror of Stage 6's black screen).** The
+camera driver installs its own SCCB master on I²C pins 5/6 — touch/PMU/ALS live
+there. After the probe the **gauge froze on "Charging" off USB** (stale reads).
+`esp_camera` uses I²C **port 1**, `Wire` uses **port 0**, same pins via the GPIO
+matrix; `esp_camera_deinit()` leaves the pins muxed to the dead port 1, and
+`Wire.begin()` is **idempotent** (early-returns, never re-muxes). Fix:
+`Wire.end(); Wire.begin(); initSharedBusSensors()` — factored the three sensor
+inits into one helper called at setup **and** post-probe. *`begin()` is not always
+re-entrant; `end()` first to force a redo.*
+
+**Serial visibility (why all this was invisible).** `pio device monitor` showed
+nothing: native-USB CDC re-enumerates on reset, so `setup()`'s one-shot logs fly
+past before the monitor reconnects, and the `if (Serial)` guards skip them. Fix:
+`while (!Serial && (millis()-t0) < 1500) delay(10)` — wait for the host **with a
+timeout** so a battery boot doesn't hang. The moment the log was readable it exposed
+the LEDC bug. **Benign remaining `[E]` noise:** `Wire … already initialized` (each
+driver re-calls `Wire.begin`) and `SPI_MASTER_MISO pin 8` (SD shares the display's
+MISO, Stage 6) — core `log_e`, silence-able with `-DCORE_DEBUG_LEVEL=0` but left on.
+
+Lesson `docs/lesson-07-camera.md` + snapshot `docs/lesson-07-camera/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
+- **📷 Live viewfinder (Stage 8)** — capture a frame into PSRAM and push it to the
+  ST7796. The camera + display in one pipeline; first heavy PSRAM use. The obvious
+  follow-on now that detection works.
 - **Log the battery gauge to CSV** — the card is a logging destination and the gauge
   is already sampling once a second. Natural next build.
 - **🐛 OPEN: deep-sleep touch wake fires instantly** (`woke: touch`). Three
