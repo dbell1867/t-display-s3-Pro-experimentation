@@ -5,21 +5,19 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 8 complete — live
-> viewfinder.** Tap on-screen "Cam" → live OV5640 image on the ST7796, press the
-> physical GPIO 16 button to exit. Pipeline: `esp_camera_fb_get()` →
-> `panel->draw16bitBeRGBBitmap()` → `esp_camera_fb_return()`, QCIF 176×144 RGB565
-> centred (fits the 222-wide panel with no scaling/cropping/rotation), fb_count 2 +
-> GRAB_LATEST in PSRAM. **Two eye-only fixes:** byte order (esp_camera RGB565 is
-> big-endian → the "Be" push, not the native one) and orientation (inverted → fixed
-> in the SENSOR with `set_vflip(s,1)`, free during readout, not a buffer flip).
-> **The camera owns the shared I²C bus while streaming, so touch/gauge freeze** —
-> enter via touch button, EXIT via the physical GPIO 16 button (the Stage 5f
-> primitive). Factored Stage 7 into `cameraFillPins()` + `cameraRecoverBus()` reused
-> by probe and viewfinder. Third bottom-row button now (68 px each) — argues for LVGL
-> flex/grid. Lesson 08 written. **NEXT: scale/rotate the viewfinder to fill the
-> portrait screen (measure fps first — non-DMA SPI ceiling), capture-to-SD a still,
-> or the deferred threads (log the gauge to CSV, LVGL flex/grid refactor).**
+> `esp32-board-bringup` skill. Current position: **Stage 9 complete — capture a
+> still to SD.** In the viewfinder, short-tap GPIO 16 saves the frame as
+> `/IMG_NNNN.JPG` (green filename under the image), long-hold exits. Pipeline
+> `esp_camera_fb_get()` → `frame2jpg(fb,80,&jpg,&len)` (bundled `img_converters.h`,
+> we `free(jpg)`) → `SD.open(next-free-name, FILE_WRITE); f.write`. **No bus fight —
+> DVP (camera) / CPU (encode) / SPI (SD write, bracketed w/ display, Stage 6);** SCCB
+> untouched during capture. Next filename comes from the card (`SD.exists` loop). One
+> button, two jobs by duration (tap<700ms=capture on release, hold≥700ms=exit).
+> Stills are viewfinder-res (QCIF). Stages 1–9 complete: display, touch, LVGL,
+> battery/PMU, power ladder (light→deep sleep, button wake), auto-brightness, SD,
+> camera detect→viewfinder→capture. Lesson 09 written. **NEXT: higher-res stills
+> (sensor reconfigure), scale/rotate the viewfinder to fill the screen, or the last
+> untouched subsystem — WiFi/BLE (e.g. serve the JPEGs over HTTP).**
 
 ---
 
@@ -502,10 +500,47 @@ Lesson `docs/lesson-08-viewfinder.md` + snapshot `docs/lesson-08-viewfinder/main
 
 ---
 
+## ✅ Stage 9 — Capture a still to SD (JPEG)   [DONE]
+
+**Result:** in the viewfinder, **short-tap GPIO 16 → saves the frame as
+`/IMG_NNNN.JPG`** (green filename shown under the image), **long-hold → exits**.
+Confirmed: green filename on tap, hold exits, JPEG written to the card.
+
+**No bus conflict — three subsystems, three buses:** camera fills the frame over the
+**DVP parallel** bus, `frame2jpg` encodes on **CPU** (+PSRAM), the SD write is
+**SPI** (shared with the display but bracketed per transfer, Stage 6). SCCB/I²C isn't
+touched during a capture. *Before assuming two ops conflict, map each to its actual
+bus.*
+
+**Encode + ownership:** `#include "img_converters.h"` (bundled, no lib_deps);
+`frame2jpg(fb, 80, &jpg, &jpgLen)` mallocs `jpg` → **we `free(jpg)`** (the C
+ownership rule again, after `fb_return` and `File::close()`). QCIF@q80 ≈ 5–8 KB vs
+~50 KB raw.
+
+**Next filename from the card itself:** `static uint16_t imgSeq`; loop
+`snprintf("/IMG_%04u.JPG") ; if(!SD.exists) break; imgSeq++` — first gap = next name,
+scans past existing files on the first capture after a reboot, so numbering never
+collides across power cycles/reflashes.
+
+**One button, two jobs by DURATION:** short tap (<700 ms, ≥40 ms debounce) = capture
+on RELEASE; long hold (≥700 ms) = exit the moment the threshold is crossed (no need
+to release). Feedback is direct GFX text BELOW the image (`drawViewfinderMsg`) — live
+frames only cover the image rect, so the status line persists until the next capture.
+
+**Note:** stills are viewfinder-resolution (QCIF, "save what you see"); higher-res
+would need a sensor reconfigure mid-session. Capture briefly freezes the live image
+(~100–300 ms encode+write) — expected, GRAB_LATEST discards the frames that filled.
+
+Lesson `docs/lesson-09-capture-sd.md` + snapshot `docs/lesson-09-capture-sd/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
-- **📷 Scale/rotate the viewfinder to fill** the portrait screen — measure the fps
-  cost first (QCIF over non-DMA SPI, the Stage 3b ceiling). Or **capture-to-SD** a
-  still (ties in Stage 6: save a JPEG frame to the card).
+- **📷 Higher-resolution stills** — reconfigure the sensor to a bigger frame for the
+  capture, then back to QCIF for preview. Or **scale/rotate the live viewfinder** to
+  fill the portrait screen (measure fps first — non-DMA SPI ceiling, Stage 3b).
+- **📡 WiFi / BLE — the last untouched subsystem** (e.g. serve the captured JPEGs
+  over HTTP). The radio is a whole domain of its own.
 - **Log the battery gauge to CSV** — the card is a logging destination and the gauge
   is already sampling once a second. Natural next build.
 - **🐛 OPEN: deep-sleep touch wake fires instantly** (`woke: touch`). Three
