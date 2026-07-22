@@ -54,6 +54,7 @@
 #include "esp_camera.h"          // bundled with the ESP32-S3 core; no lib_deps needed
 #include "img_converters.h"      // frame2jpg(): RGB565 frame -> JPEG (Stage 9)
 #include <WiFi.h>                // the radio (Stage 10); bundled with the core
+#include <WebServer.h>           // synchronous HTTP server (Stage 12); bundled
 
 // ---- Display pins (SPI) ----
 #define TFT_SCLK 18
@@ -1021,6 +1022,74 @@ static void initSD(void) {
 static const char *AP_SSID = "TDisplay-S3-Pro";
 static const char *AP_PASS = "tdisplay123";     // >= 8 chars (WPA2); public by design
 
+// ---- Stage 12: HTTP server — serve the SD card's captures to a phone --------
+// The synchronous WebServer is serviced from our AP loop (server.handleClient()),
+// which is exactly the shape of loop we already have. It's file-scope so the route
+// handlers (which take no args) can reach it.
+static WebServer wifiServer(80);
+
+// SD File::name() differs across core versions (basename vs full path); normalise.
+static String baseName(const String &p) {
+  int s = p.lastIndexOf('/');
+  return (s >= 0) ? p.substring(s + 1) : p;
+}
+
+// GET / — build a gallery of every /IMG_*.JPG on the card. Sent in CHUNKS
+// (CONTENT_LENGTH_UNKNOWN) so we never hold the whole page in RAM, no matter how
+// many photos there are. The <img> tags point back at this same server, so the
+// browser fetches each JPEG via handleFile() below.
+static void handleIndex(void) {
+  wifiServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  wifiServer.send(200, "text/html", "");        // begin a chunked response
+  wifiServer.sendContent(
+    "<!DOCTYPE html><html><head>"
+    "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+    "<title>T-Display captures</title><style>"
+    "body{font-family:sans-serif;margin:0;background:#111;color:#eee}"
+    "h1{padding:12px;font-size:20px}a{display:inline-block;width:48%;margin:1%}"
+    "img{width:100%;border-radius:6px;display:block}</style></head><body>"
+    "<h1>Captures</h1>");
+
+  int count = 0;
+  File dir = SD.open("/");
+  if (dir) {
+    File e;
+    while ((e = dir.openNextFile())) {
+      String n = baseName(String(e.name()));
+      e.close();
+      if (n.endsWith(".JPG") || n.endsWith(".jpg")) {
+        String href = "/" + n;
+        wifiServer.sendContent("<a href=\"" + href + "\"><img src=\"" + href + "\"></a>");
+        count++;
+      }
+    }
+    dir.close();
+  }
+  if (count == 0)
+    wifiServer.sendContent("<p>No captures yet — take some in the viewfinder.</p>");
+  wifiServer.sendContent("</body></html>");
+  wifiServer.sendContent("");                   // empty chunk = end of response
+  if (Serial) Serial.printf("HTTP GET / -> %d images\n", count);
+}
+
+// Any other path — stream that JPEG straight off the SD card. Content-Type
+// image/jpeg is what tells the browser to render it as a photo. streamFile()
+// chunks the file for us; we only add the type.
+static void handleFile(void) {
+  String path = "/" + baseName(wifiServer.uri());
+  if ((path.endsWith(".JPG") || path.endsWith(".jpg")) && SD.exists(path)) {
+    File f = SD.open(path, FILE_READ);
+    if (f) {
+      wifiServer.streamFile(f, "image/jpeg");
+      f.close();
+      if (Serial) Serial.printf("HTTP GET %s -> served\n", path.c_str());
+      return;
+    }
+  }
+  wifiServer.send(404, "text/plain", "not found");
+  if (Serial) Serial.printf("HTTP GET %s -> 404\n", wifiServer.uri().c_str());
+}
+
 static void runWifiAP(void) {
   setBacklight(BL_MAX_DUTY);
   panel->fillScreen(RGB565_BLACK);
@@ -1039,7 +1108,7 @@ static void runWifiAP(void) {
 
   panel->setTextSize(1);
   panel->setTextColor(RGB565_WHITE);
-  panel->setCursor(4, 40);  panel->print("Join this network:");
+  panel->setCursor(4, 40);  panel->print("Join, then open in a browser:");
 
   panel->setTextSize(2);
   panel->setCursor(4, 58);   panel->print("SSID:");
@@ -1047,21 +1116,30 @@ static void runWifiAP(void) {
   panel->setCursor(4, 104);  panel->print("Pass:");
   panel->setCursor(4, 124);  panel->print(AP_PASS);
 
-  panel->setTextSize(1);
-  char ipline[32];
-  snprintf(ipline, sizeof(ipline), "IP: %s", ip.toString().c_str());
-  panel->setCursor(4, 152);  panel->print(ipline);
+  panel->setTextColor(RGB565_GREEN);
+  char urlline[40];
+  snprintf(urlline, sizeof(urlline), "http://%s", ip.toString().c_str());
+  panel->setCursor(4, 150);  panel->print(urlline);
 
+  panel->setTextSize(1);
   panel->setTextColor(RGB565_WHITE);
   panel->setCursor(4, SCREEN_H - 14);
   panel->print("tap to stop hotspot");
 
+  // Start the HTTP server: "/" is the gallery, anything else is a file lookup.
+  wifiServer.on("/", handleIndex);
+  wifiServer.onNotFound(handleFile);
+  wifiServer.begin();
+  if (Serial) Serial.println("HTTP server started on port 80");
+
   // Live client count: softAPgetStationNum() = devices currently associated. Redraw
   // only when it changes. This is the "connected" proof — 0 -> 1 when a phone joins.
-  const int countY = 182;
+  const int countY = 184;
   int  lastCount = -1;
   bool prevTouch = true;   // start true so a lingering touch can't instantly stop it
   while (true) {
+    wifiServer.handleClient();   // service any pending HTTP request (non-blocking)
+
     int clients = WiFi.softAPgetStationNum();
     if (clients != lastCount) {
       panel->fillRect(0, countY, SCREEN_W, 22, RGB565_BLACK);
@@ -1078,9 +1156,10 @@ static void runWifiAP(void) {
     bool touched = (touch.getPoint(tx, ty, 1) > 0);
     if (touched && !prevTouch) break;
     prevTouch = touched;
-    delay(100);
+    delay(5);                    // tight: HTTP wants to be serviced promptly
   }
 
+  wifiServer.stop();             // close the listening socket
   WiFi.softAPdisconnect(true);   // stop the AP AND power the radio down
   WiFi.mode(WIFI_OFF);
 
