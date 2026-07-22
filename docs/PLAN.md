@@ -5,19 +5,16 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 11 complete — WiFi connect,
-> board as ACCESS POINT.** Press GPIO 12 → hotspot showing SSID `TDisplay-S3-Pro` /
-> pass `tdisplay123` / IP `192.168.4.1` + live client count; phone joins → count
-> flips 0→1 (confirmed). `WiFi.mode(WIFI_AP); WiFi.softAP(ssid,pass)` (WPA2 pass ≥8);
-> `WiFi.softAPIP()`=192.168.4.1; `WiFi.softAPgetStationNum()`=clients; exit
-> `WiFi.softAPdisconnect(true)` + `WIFI_OFF`. **AP over STA:** no router, no stored
-> creds, fixed known IP. **AP creds are PUBLIC by design** (shown on screen) so
-> hard-coding is correct — inverts the STA rule. Phone shows "no internet" (expected)
-> and may auto-drop; Stage 12's page fixes that. Stages 1–11 complete: display, touch,
-> LVGL, battery/PMU, power ladder, auto-brightness, SD, camera detect→viewfinder→
-> capture, WiFi scan→AP. Lesson 11 written. **NEXT: Stage 12 HTTP server at
-> http://192.168.4.1/ serving the SD `/IMG_NNNN.JPG` captures to the phone — the
-> capstone (camera+SD+radio in one loop).**
+> `esp32-board-bringup` skill. Current position: **🎉 PROJECT COMPLETE — Stage 12
+> (HTTP photo server) done, full board tour Stages 1–12.** Blank board → working web
+> app. GPIO 16 shoots photos (camera viewfinder → JPEG to SD); GPIO 12 → Wi-Fi hotspot
+> `TDisplay-S3-Pro`/`tdisplay123` running a `WebServer(80)` at `http://192.168.4.1/`
+> that serves a gallery of the SD card's `/IMG_*.JPG` (index built in chunks;
+> `streamFile(f,"image/jpeg")`; Content-Type is the trick). Confirmed on HW: gallery
+> loads and shows the photos. Every stage has a `docs/lesson-NN-*.md` + `main.cpp`
+> snapshot; methodology in the `esp32-board-bringup` skill (gotchas 1–32). **NEXT: all
+> optional refinements** — higher-res stills, full-screen viewfinder, BLE, serve a
+> live frame over HTTP, log the gauge to CSV, LVGL flex/grid refactor. See `docs/PLAN.md`.
 
 ---
 
@@ -592,13 +589,53 @@ Lesson `docs/lesson-11-wifi-ap.md` + snapshot `docs/lesson-11-wifi-ap/main.cpp`.
 
 ---
 
-## ▶ Next — pick by interest   ← NEXT
-- **📡 Stage 12 — HTTP server (the capstone):** at `http://192.168.4.1/`, list the SD
-  card's `/IMG_NNNN.JPG` captures and serve them to the phone — camera + SD + radio in
-  one loop, and the reason the phone stays connected. `WebServer` (bundled) or
-  `WiFiServer`; server lives in the AP loop.
-- Smaller camera refinements still open: higher-res stills (sensor reconfigure),
-  scale/rotate the viewfinder to fill the screen.
+## ✅ Stage 12 — HTTP server: serve the SD photos (THE CAPSTONE)   [DONE]
+
+**Result:** GPIO 12 → hotspot; join it, open **`http://192.168.4.1/`** on a phone →
+a dark **gallery page** of the SD card's `/IMG_*.JPG` captures, tap one for full
+size. Confirmed: gallery loads, shows the photos. Camera + SD + radio in one request.
+
+**Bundled synchronous `WebServer(80)`** (no lib_deps), file-scope so the no-arg
+handlers reach it; pumped by `wifiServer.handleClient()` in the AP loop (delay
+100→5 ms). Two routes: **`on("/", handleIndex)`** builds the gallery, **`onNotFound
+(handleFile)`** is a catch-all that streams any requested `.JPG`. **Index built in
+CHUNKS** (`setContentLength(CONTENT_LENGTH_UNKNOWN)` + `send(200,"text/html","")` +
+`sendContent(...)` per file, empty chunk ends it) — never holds the page in RAM.
+**File served with `streamFile(f, "image/jpeg")`** — *Content-Type is the whole
+trick*: `text/html` renders, `image/jpeg` shows a photo, wrong type = gibberish
+download; same bytes, the header decides meaning. `baseName()` normalises
+`File::name()` (basename vs full path across core versions). Exit order:
+`wifiServer.stop()` → `softAPdisconnect(true)` → `WIFI_OFF`.
+
+**The AP loop finally does real work** — `handleClient()` is *why the phone stays
+connected* (cures Stage 11's no-internet auto-drop: now there's a server answering).
+No new bus contention (SD+radio serviced sequentially, single-threaded). Security is
+by proximity (isolated password-gated hotspot that only exists while the screen's
+open); a public server would need path-sanitising + auth. Flash 44%→45%.
+
+Lesson `docs/lesson-12-http-server.md` + snapshot `docs/lesson-12-http-server/main.cpp`.
+
+---
+
+## 🎉 PROJECT COMPLETE — full board tour, Stages 1–12
+
+Blank board → working web app: **first light → touch → LVGL → battery/PMU → power
+ladder (light/deep sleep, button wake) → auto-brightness → SD → camera detect →
+viewfinder → capture-to-SD → WiFi scan → hotspot → HTTP photo server.** GPIO 16 shoots
+photos; GPIO 12 serves them. Every stage has a `docs/lesson-NN-*.md` + `main.cpp`
+snapshot; the reusable methodology lives in the `esp32-board-bringup` skill.
+
+## ▶ Refinements — all optional, pick by interest
+- **Camera:** higher-res stills (reconfigure the sensor for the capture, back to QCIF
+  for preview); scale/rotate the viewfinder to fill the portrait screen (measure fps
+  first — non-DMA SPI ceiling).
+- **Radio:** BLE (the other half of the radio); serve a live viewfinder frame over
+  HTTP; add a "delete" button to the gallery.
+- **UI/data:** log the battery gauge to CSV on the SD; the LVGL flex/grid refactor
+  (~10 widgets hand-aligned, `lv_obj_align` has no collision detection); swap the
+  `millis()` throttle for `lv_timer_create`.
+- **Open power thread:** the ~2 mA run-to-run drift below this meter's resolution
+  (needs a better instrument, not firmware).
 - **Log the battery gauge to CSV** — the card is a logging destination and the gauge
   is already sampling once a second. Natural next build.
 - **🐛 OPEN: deep-sleep touch wake fires instantly** (`woke: touch`). Three
