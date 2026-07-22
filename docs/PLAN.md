@@ -5,18 +5,20 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **🎉 PROJECT COMPLETE — Stage 13
-> (Bluetooth LE) done, full board tour Stages 1–13, BOTH halves of the radio.** Blank
-> board → two wireless apps. GPIO 16 shoots photos (viewfinder → JPEG to SD); GPIO 12
+> `esp32-board-bringup` skill. Current position: **🎉 PROJECT COMPLETE — Stage 14
+> done, full board tour Stages 1–14, both halves of the radio brought up AND
+> measured.** Blank board → two wireless apps + power characterisation. Controls: touch
+> **Cam** button → viewfinder (GPIO 16 tap = capture JPEG to SD, hold = exit); GPIO 12
 > TAP → WiFi hotspot + `WebServer(80)` gallery at `http://192.168.4.1/` serving the SD
-> `/IMG_*.JPG`; GPIO 12 HOLD → BLE advertising the standard Battery Service
-> (`0x180F`/`0x2A19`, notify via BLE2902 CCCD) fed by the SY6970 gauge. Confirmed on
-> HW: gallery loads; BLE reads *Connected + Notifying* and streams battery %. Flash
-> 53% (WiFi+BLE both linked, separate modals). Every stage has a `docs/lesson-NN-*.md`
-> + `main.cpp` snapshot; methodology + 34 gotchas in the `esp32-board-bringup` skill.
-> **NEXT: all optional refinements** — higher-res stills, full-screen viewfinder,
-> custom BLE service, serve a live frame over HTTP, log the gauge to CSV, LVGL
-> flex/grid refactor. See `docs/PLAN.md`.
+> `/IMG_*.JPG`; GPIO 12 HOLD → BLE Battery Service (`0x180F`/`0x2A19`, notify via
+> BLE2902 CCCD) from the SY6970 gauge; GPIO 16 (top-level) → radio power bench. HW-
+> confirmed: gallery loads; BLE *Connected + Notifying*; radio bench measured **WiFi
+> ≈ +45 mA, BLE ≈ +9 mA** over baseline (WiFi ~5× BLE; cost is being ON not connected;
+> AP has no modem-sleep). Flash 53% (WiFi+BLE both linked, separate modals). Every
+> stage has a `docs/lesson-NN-*.md` + `main.cpp` snapshot; methodology + 35 gotchas in
+> the `esp32-board-bringup` skill. **NEXT: all optional refinements** — higher-res
+> stills, full-screen viewfinder, custom BLE service, serve a live frame over HTTP,
+> log the gauge to CSV, LVGL flex/grid refactor. See `docs/PLAN.md`.
 
 ---
 
@@ -653,15 +655,42 @@ Lesson `docs/lesson-13-bluetooth-le.md` + snapshot `docs/lesson-13-bluetooth-le/
 
 ---
 
-## 🎉 PROJECT COMPLETE — full board tour, Stages 1–13
+## ✅ Stage 14 — Radio power bench: WiFi vs BLE cost   [DONE]
 
-Blank board → two working wireless apps: **first light → touch → LVGL → battery/PMU →
-power ladder (light/deep sleep, button wake) → auto-brightness → SD → camera detect →
-viewfinder → capture-to-SD → WiFi scan → hotspot → HTTP photo server → BLE Battery
-Service.** GPIO 16 shoots photos; GPIO 12 taps to serve them over WiFi, holds to
-stream battery over BLE. **Both halves of the radio exercised.** Every stage has a
-`docs/lesson-NN-*.md` + `main.cpp` snapshot; the methodology + 34 gotchas live in the
-`esp32-board-bringup` skill.
+**Result:** press **GPIO 16** (the rocker half opposite GPIO 12) → a radio power
+bench that holds each radio state steady (full brightness, charging disabled) so the
+inline meter settles; step with GPIO 16, tap to exit. **Measured deltas over a 158 mA
+baseline:** WiFi AP idle **+45**, WiFi + client **+46**, BLE advertising **+9**, BLE
+connected **+9** mA. (Same hold-a-state / trust-the-delta method as Stage 5e; the
+baseline's host-link + screen are common-mode and cancel.)
+
+**Findings:** (1) **WiFi ≈ 5× BLE** (+45 vs +9 mA). (2) **The cost is being ON, not
+connected** — WiFi idle ≈ WiFi+client, BLE adv = BLE connected; associating adds
+nothing measurable at idle (sustained TX would add bursts we didn't measure). (3) **An
+AP has no modem-sleep** → +45 mA continuous, client or not, because it must stay awake
+for clients — AP mode (Stage 11) is the power-hungry WiFi mode; a STA on a router
+could modem-sleep much lower. (4) **BLE sips by design** (brief advertising bursts).
+
+**Design rules earned:** duty-cycle the radio hard (off by default — firmware already
+does `WIFI_OFF`/`deinit` on modal exit, deltas vanish to baseline); prefer BLE for
+small/infrequent data; never leave an AP running "just in case"; if WiFi + low power,
+use STA+modem-sleep not AP. Trigger = GPIO 16 top-level (guarded so a deep-sleep-wake
+hold can't phantom-fire).
+
+Lesson `docs/lesson-14-radio-power.md` + snapshot `docs/lesson-14-radio-power/main.cpp`.
+
+---
+
+## 🎉 PROJECT COMPLETE — full board tour, Stages 1–14
+
+Blank board → two working wireless apps + full power characterisation: **first light →
+touch → LVGL → battery/PMU → power ladder (light/deep sleep, button wake) →
+auto-brightness → SD → camera detect → viewfinder → capture-to-SD → WiFi scan →
+hotspot → HTTP photo server → BLE Battery Service → radio power bench.** GPIO 16 (tap)
+shoots the radio bench; GPIO 12 taps to serve photos over WiFi, holds to stream
+battery over BLE. **Both halves of the radio exercised AND measured** (WiFi +45 mA,
+BLE +9 mA). Every stage has a `docs/lesson-NN-*.md` + `main.cpp` snapshot; the
+methodology + 34 gotchas live in the `esp32-board-bringup` skill.
 
 ## ▶ Refinements — all optional, pick by interest
 - **Camera:** higher-res stills (reconfigure the sensor for the capture, back to QCIF
