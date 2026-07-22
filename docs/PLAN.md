@@ -5,16 +5,18 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **🎉 PROJECT COMPLETE — Stage 12
-> (HTTP photo server) done, full board tour Stages 1–12.** Blank board → working web
-> app. GPIO 16 shoots photos (camera viewfinder → JPEG to SD); GPIO 12 → Wi-Fi hotspot
-> `TDisplay-S3-Pro`/`tdisplay123` running a `WebServer(80)` at `http://192.168.4.1/`
-> that serves a gallery of the SD card's `/IMG_*.JPG` (index built in chunks;
-> `streamFile(f,"image/jpeg")`; Content-Type is the trick). Confirmed on HW: gallery
-> loads and shows the photos. Every stage has a `docs/lesson-NN-*.md` + `main.cpp`
-> snapshot; methodology in the `esp32-board-bringup` skill (gotchas 1–32). **NEXT: all
-> optional refinements** — higher-res stills, full-screen viewfinder, BLE, serve a
-> live frame over HTTP, log the gauge to CSV, LVGL flex/grid refactor. See `docs/PLAN.md`.
+> `esp32-board-bringup` skill. Current position: **🎉 PROJECT COMPLETE — Stage 13
+> (Bluetooth LE) done, full board tour Stages 1–13, BOTH halves of the radio.** Blank
+> board → two wireless apps. GPIO 16 shoots photos (viewfinder → JPEG to SD); GPIO 12
+> TAP → WiFi hotspot + `WebServer(80)` gallery at `http://192.168.4.1/` serving the SD
+> `/IMG_*.JPG`; GPIO 12 HOLD → BLE advertising the standard Battery Service
+> (`0x180F`/`0x2A19`, notify via BLE2902 CCCD) fed by the SY6970 gauge. Confirmed on
+> HW: gallery loads; BLE reads *Connected + Notifying* and streams battery %. Flash
+> 53% (WiFi+BLE both linked, separate modals). Every stage has a `docs/lesson-NN-*.md`
+> + `main.cpp` snapshot; methodology + 34 gotchas in the `esp32-board-bringup` skill.
+> **NEXT: all optional refinements** — higher-res stills, full-screen viewfinder,
+> custom BLE service, serve a live frame over HTTP, log the gauge to CSV, LVGL
+> flex/grid refactor. See `docs/PLAN.md`.
 
 ---
 
@@ -617,20 +619,57 @@ Lesson `docs/lesson-12-http-server.md` + snapshot `docs/lesson-12-http-server/ma
 
 ---
 
-## 🎉 PROJECT COMPLETE — full board tour, Stages 1–12
+## ✅ Stage 13 — Bluetooth LE: Battery Service   [DONE]
 
-Blank board → working web app: **first light → touch → LVGL → battery/PMU → power
-ladder (light/deep sleep, button wake) → auto-brightness → SD → camera detect →
-viewfinder → capture-to-SD → WiFi scan → hotspot → HTTP photo server.** GPIO 16 shoots
-photos; GPIO 12 serves them. Every stage has a `docs/lesson-NN-*.md` + `main.cpp`
-snapshot; the reusable methodology lives in the `esp32-board-bringup` skill.
+**Result:** **HOLD GPIO 12** → the board advertises over BLE as `TDisplay-S3-Pro`
+and exposes the **standard Battery Service** (`0x180F` / Level `0x2A19`) fed by the
+SY6970 gauge; connect with nRF Connect and **subscribe** → live battery % streams.
+Confirmed: device screen read *Connected + Notifying*, level updated in the app.
+
+**BLE ≠ Bluetooth Classic** — the S3 is **BLE-only** (no SPP/serial). GATT model:
+advertise → client connects → **services** (`0x180F`) hold **characteristics**
+(`0x2A19`, props READ|NOTIFY) that the client reads/subscribes to. **Standard UUIDs**
+mean generic apps label it "Battery Level" for free. `BLEDevice::init` →
+`createServer` → `createService` → `createCharacteristic` → `addDescriptor(new
+BLE2902())` (the **CCCD** — where the client subscribes) → `service->start()` →
+`getAdvertising()->addServiceUUID` → `startAdvertising()`. Push with `setValue()` +
+`chr->notify()` (no-op unless subscribed). On disconnect, restart advertising.
+
+**🐛 Subscription bug diagnosed FROM THE DEVICE:** app showed 80% while device showed
+74% and updates weren't arriving — a *stale one-time Read* vs a drifted device = "not
+subscribed." Instead of poking the phone, queried the device's own CCCD
+(`cccd->getNotifications()`) and showed it on screen: `Advertising...` / `Connected -
+enable Notify` / `Connected + Notifying`. Turned a black-box guess into a fact; the
+fix was app-side (find the triple-down-arrow notify icon) but the *diagnosis* was
+firmware-side. *When a two-sided interaction misbehaves, instrument the side you
+control.*
+
+**GPIO 12 now does BOTH radios by press duration:** TAP (<700 ms) = WiFi hotspot,
+HOLD (≥700 ms) = BLE (Stage 9 tap/hold pattern). **Flash 45%→53%** (Bluedroid); WiFi
++ BLE both linked (~1.76 MB), separate modals, each `deinit`s on exit so only one
+radio stack is live at a time.
+
+Lesson `docs/lesson-13-bluetooth-le.md` + snapshot `docs/lesson-13-bluetooth-le/main.cpp`.
+
+---
+
+## 🎉 PROJECT COMPLETE — full board tour, Stages 1–13
+
+Blank board → two working wireless apps: **first light → touch → LVGL → battery/PMU →
+power ladder (light/deep sleep, button wake) → auto-brightness → SD → camera detect →
+viewfinder → capture-to-SD → WiFi scan → hotspot → HTTP photo server → BLE Battery
+Service.** GPIO 16 shoots photos; GPIO 12 taps to serve them over WiFi, holds to
+stream battery over BLE. **Both halves of the radio exercised.** Every stage has a
+`docs/lesson-NN-*.md` + `main.cpp` snapshot; the methodology + 34 gotchas live in the
+`esp32-board-bringup` skill.
 
 ## ▶ Refinements — all optional, pick by interest
 - **Camera:** higher-res stills (reconfigure the sensor for the capture, back to QCIF
   for preview); scale/rotate the viewfinder to fill the portrait screen (measure fps
   first — non-DMA SPI ceiling).
-- **Radio:** BLE (the other half of the radio); serve a live viewfinder frame over
-  HTTP; add a "delete" button to the gallery.
+- **Radio:** serve a live viewfinder frame over HTTP; a **custom** BLE service (e.g.
+  push a capture-count or trigger a capture from the phone); add a "delete" button to
+  the gallery.
 - **UI/data:** log the battery gauge to CSV on the SD; the LVGL flex/grid refactor
   (~10 widgets hand-aligned, `lv_obj_align` has no collision detection); swap the
   `millis()` throttle for `lv_timer_create`.
