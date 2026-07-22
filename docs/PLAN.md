@@ -5,18 +5,19 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **Stage 10 complete — WiFi first
-> light (scan).** Press GPIO 12 → full-screen list of nearby networks (SSID/RSSI/
-> lock), tap to exit; 5 found, sensible RSSI. Radio+antenna proven, scan only.
-> `#include <WiFi.h>` (bundled, no lib_deps) cost flash 26%→44%. Pattern:
-> `WiFi.mode(WIFI_STA); WiFi.disconnect(); WiFi.scanNetworks()` (blocks ~2-4s), read
-> `SSID/RSSI(dBm, →0=stronger)/encryptionType`, then `WiFi.mode(WIFI_OFF)` (idle
-> radio ~tens of mA — protects the Stage 5 power work). Triggered by the re-found
-> GPIO 12 button. **The radio needs NO bus-sharing dance** (on-die, own antenna) —
-> only power/RAM. Stages 1–10 complete: display, touch, LVGL, battery/PMU, power
-> ladder, auto-brightness, SD, camera detect→viewfinder→capture, WiFi scan. Lesson 10
-> written. **NEXT: Stage 11 CONNECT (`WiFi.begin`, needs Derek's credentials +
-> STA-vs-AP decision), then Stage 12 HTTP server for the SD JPEGs (the capstone).**
+> `esp32-board-bringup` skill. Current position: **Stage 11 complete — WiFi connect,
+> board as ACCESS POINT.** Press GPIO 12 → hotspot showing SSID `TDisplay-S3-Pro` /
+> pass `tdisplay123` / IP `192.168.4.1` + live client count; phone joins → count
+> flips 0→1 (confirmed). `WiFi.mode(WIFI_AP); WiFi.softAP(ssid,pass)` (WPA2 pass ≥8);
+> `WiFi.softAPIP()`=192.168.4.1; `WiFi.softAPgetStationNum()`=clients; exit
+> `WiFi.softAPdisconnect(true)` + `WIFI_OFF`. **AP over STA:** no router, no stored
+> creds, fixed known IP. **AP creds are PUBLIC by design** (shown on screen) so
+> hard-coding is correct — inverts the STA rule. Phone shows "no internet" (expected)
+> and may auto-drop; Stage 12's page fixes that. Stages 1–11 complete: display, touch,
+> LVGL, battery/PMU, power ladder, auto-brightness, SD, camera detect→viewfinder→
+> capture, WiFi scan→AP. Lesson 11 written. **NEXT: Stage 12 HTTP server at
+> http://192.168.4.1/ serving the SD `/IMG_NNNN.JPG` captures to the phone — the
+> capstone (camera+SD+radio in one loop).**
 
 ---
 
@@ -565,11 +566,37 @@ Lesson `docs/lesson-10-wifi-scan.md` + snapshot `docs/lesson-10-wifi-scan/main.c
 
 ---
 
+## ✅ Stage 11 — WiFi connect: board as ACCESS POINT   [DONE]
+
+**Result:** press **GPIO 12** → the board becomes a Wi-Fi hotspot showing SSID
+(`TDisplay-S3-Pro`) / password (`tdisplay123`) / IP (`192.168.4.1`) and a **live
+client count**; join from a phone → **count flips 0→1** (confirmed). Tap to stop.
+Association proven — no server yet (Stage 12).
+
+**AP vs STA** — chose AP (board IS the network): no router dependency, no stored home
+credentials, **fixed known IP** so Stage 12's URL is predictable; STA would reach the
+internet but that's not what a photo-handing device needs. `WiFi.mode(WIFI_AP);
+WiFi.softAP(ssid, pass)` (WPA2 pass ≥8 chars); `WiFi.softAPIP()` = 192.168.4.1;
+`WiFi.softAPgetStationNum()` = live client count. Exit: `WiFi.softAPdisconnect(true)`
++ `WiFi.mode(WIFI_OFF)` (radio off — power budget, Stage 5).
+
+**Credentials are PUBLIC by design** — an AP's own SSID/pass are shown on screen and
+handed out, so hard-coding is correct (inverts Stage 10's "don't commit a home WiFi
+password"). *Same act — hard-coding a WiFi credential — wrong in STA, right in AP;
+context decides.* **Expected phone behaviour:** "no internet" warning (correct — no
+upstream router) and some phones auto-drop a no-internet AP (count bounces 1→0);
+Stage 12's page gives them a reason to stay. Flash unchanged from Stage 10 (same lib,
+different call). Still a blocking modal — Stage 12's HTTP server lives in this loop.
+
+Lesson `docs/lesson-11-wifi-ap.md` + snapshot `docs/lesson-11-wifi-ap/main.cpp`.
+
+---
+
 ## ▶ Next — pick by interest   ← NEXT
-- **📡 Stage 11 — CONNECT to WiFi:** `WiFi.begin(ssid,pass)` → wait `WL_CONNECTED` →
-  show the IP. **Needs Derek's credentials + the STA-vs-AP decision** (join home
-  network vs board-as-hotspot). Then **Stage 12 — HTTP server** serving the SD card's
-  JPEGs to a phone (ties camera+SD+radio together — the capstone).
+- **📡 Stage 12 — HTTP server (the capstone):** at `http://192.168.4.1/`, list the SD
+  card's `/IMG_NNNN.JPG` captures and serve them to the phone — camera + SD + radio in
+  one loop, and the reason the phone stays connected. `WebServer` (bundled) or
+  `WiFiServer`; server lives in the AP loop.
 - Smaller camera refinements still open: higher-res stills (sensor reconfigure),
   scale/rotate the viewfinder to fill the screen.
 - **Log the battery gauge to CSV** — the card is a logging destination and the gauge
