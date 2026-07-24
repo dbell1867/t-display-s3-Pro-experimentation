@@ -5,20 +5,28 @@ already researched, **steps**, and **done-when** criteria. Check items off as yo
 
 > **Resume here:** read `docs/lesson-01-first-light.md` and `docs/lesson-02-touch.md`
 > for what's already done and why. The reusable workflow lives in the
-> `esp32-board-bringup` skill. Current position: **🎉 PROJECT COMPLETE — Stage 14
-> done, full board tour Stages 1–14, both halves of the radio brought up AND
-> measured.** Blank board → two wireless apps + power characterisation. Controls: touch
+> `esp32-board-bringup` skill. Current position: **Stage 15 done — full board tour
+> (1–14) PLUS software instrumentation.** The hardware tour is complete; the project
+> has turned inward to C++ structure and resource measurement. Controls: touch
 > **Cam** button → viewfinder (GPIO 16 tap = capture JPEG to SD, hold = exit); GPIO 12
 > TAP → WiFi hotspot + `WebServer(80)` gallery at `http://192.168.4.1/` serving the SD
 > `/IMG_*.JPG`; GPIO 12 HOLD → BLE Battery Service (`0x180F`/`0x2A19`, notify via
 > BLE2902 CCCD) from the SY6970 gauge; GPIO 16 (top-level) → radio power bench. HW-
 > confirmed: gallery loads; BLE *Connected + Notifying*; radio bench measured **WiFi
 > ≈ +45 mA, BLE ≈ +9 mA** over baseline (WiFi ~5× BLE; cost is being ON not connected;
-> AP has no modem-sleep). Flash 53% (WiFi+BLE both linked, separate modals). Every
-> stage has a `docs/lesson-NN-*.md` + `main.cpp` snapshot; methodology + 35 gotchas in
-> the `esp32-board-bringup` skill. **NEXT: all optional refinements** — higher-res
-> stills, full-screen viewfinder, custom BLE service, serve a live frame over HTTP,
-> log the gauge to CSV, LVGL flex/grid refactor. See `docs/PLAN.md`.
+> AP has no modem-sleep). Flash 53% (WiFi+BLE both linked, separate modals).
+> **Stage 15** added `ResourceMonitor` (first real C++ class, own header/`.cpp`) +
+> `include/board_pins.h` (`#define`→`constexpr`): boot resource report, `[res]` line
+> every 10 s, and heap deltas bracketing the radios. Measured: **largest block 136 KB
+> → 59 KB** (fragmentation, while free heap barely moved), **WiFi's 18 KB is one-time
+> not a leak**, **BLE costs more RAM but less power than WiFi** (Stage 14 inverts),
+> and **core 0 is idle** — all our code is `loopTask` on core 1. Every stage has a
+> `docs/lesson-NN-*.md` + snapshot; methodology + 37 gotchas in the
+> `esp32-board-bringup` skill. **NEXT (recommended): Stage 16 — FreeRTOS tasks / use
+> core 0**, now that we own the instruments (stack low-water marks, per-task CPU) to
+> do it safely. Also open: finish splitting `main.cpp` (camera, storage, UI modules);
+> optional refinements — higher-res stills, full-screen viewfinder, custom BLE
+> service, live frame over HTTP, log the gauge to CSV, LVGL flex/grid refactor.
 
 ---
 
@@ -681,7 +689,52 @@ Lesson `docs/lesson-14-radio-power.md` + snapshot `docs/lesson-14-radio-power/ma
 
 ---
 
-## 🎉 PROJECT COMPLETE — full board tour, Stages 1–14
+## ✅ Stage 15 — Resource monitor: memory, CPU, tasks   [DONE]
+
+**Goal:** turn the project's "make invisible state visible" method on the *firmware
+itself*, and start breaking up the 1500-line `main.cpp` with the first real C++ class.
+
+**Built:**
+- `include/board_pins.h` — all 40-odd pins/tuning constants moved out of `main.cpp`
+  and converted `#define` → **`constexpr`** (typed, scoped, debuggable, zero runtime
+  cost). Required **no other changes** — a genuinely drop-in improvement.
+- `src/ResourceMonitor.{h,cpp}` — first proper class in its own header/`.cpp` pair.
+  `private:` state, `const` methods, and `Print &out` (reference to an abstract base,
+  so reports aim at Serial / a client / a String). **Fixed array, no `std::vector`**:
+  a thing that measures allocation must not allocate — observer effect. Same reason
+  the report is serial-only, not drawn on-screen.
+- Boot `reportAll()`, a `[res]` one-liner every 10 s, and `mark()`/`reportDelta()`
+  bracketing the WiFi and BLE modals in `loop()`.
+
+**Measured (HW-confirmed):**
+- **Fragmentation is the headline.** Largest allocatable block **136 KB → 95 KB
+  (after WiFi) → 59 KB (after BLE)** while free heap only fell 189→171 KB. BLE's heap
+  delta was **+400 B** — it returned the *quantity* but not the *contiguity*.
+  Fragmentation **plateaued** (steady at 59 K / 65% over three sessions) and **never
+  recovers** until reboot.
+- **Stage 14 inverts.** WiFi **+45 mA / −17 KB** peak; BLE **+9 mA / −38 KB** peak.
+  BLE is ~5× cheaper in power and >2× dearer in peak RAM. "Cheap" needs a resource.
+- **WiFi's 18 KB is a ONE-TIME stack init**, not a leak: 1st session −18,324 B, 2nd
+  and 3rd −280 B (low-water −12 B then **+0 B**). So Stage 14's "duty-cycle the radio
+  hard" rule carries **no** memory penalty — power and memory rules agree.
+- **7 tasks running**, all our code in `loopTask` pinned to **core 1** at 2.7%;
+  **core 0 essentially idle**. System tasks have **<300 B stack headroom** (IDLE0
+  236 B, ipc0 252 B) — never work in an idle hook; `esp_timer` over-provisioned ~8 KB.
+- **Stage 7 vindicated:** camera re-init + 19 fps viewfinder ran fine at 66%
+  fragmentation, because `CAMERA_FB_IN_PSRAM` puts the big buffers in PSRAM (2%
+  fragmented). **Which pool beats how much free.**
+
+**Bugs the run exposed (fixed):** literal `CPU%%` in a `println`; a misleading
+"stacks only" message (first-sample percentages *are* valid — average since boot);
+and SD sizes — a 64 GB byte count **does not fit in 32-bit `size_t`**, so capacities
+stay `uint64_t`.
+
+Lesson `docs/lesson-15-resource-monitor.md` + snapshots in
+`docs/lesson-15-resource-monitor/` (main.cpp, ResourceMonitor.{h,cpp}, board_pins.h).
+
+---
+
+## 🎉 PROJECT COMPLETE — full board tour, Stages 1–14 (+15 instrumentation)
 
 Blank board → two working wireless apps + full power characterisation: **first light →
 touch → LVGL → battery/PMU → power ladder (light/deep sleep, button wake) →
